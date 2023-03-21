@@ -19,11 +19,13 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <mfxvideo.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <va/va.h>
 #include <va/va_drm.h>
@@ -39,6 +41,12 @@ struct Surface {
   bool locked;
 };
 
+struct TimingStats {
+  unsigned long long min;
+  unsigned long long max;
+  unsigned long long sum;
+};
+
 struct DecodeContext {
   int drm_fd;
   VADisplay display;
@@ -52,7 +60,42 @@ struct DecodeContext {
   uint32_t packet_offset;
   struct Surface** sufaces;
   struct Frame* decoded;
+
+  unsigned long long recording_started;
+  unsigned long long frame_header_ts;
+  unsigned long long frame_received_ts;
+  unsigned long long frame_decoded_ts;
+  unsigned long long frame_counter;
+  unsigned long long bitstream;
+
+  struct TimingStats receive;
+  struct TimingStats decode;
+  struct TimingStats total;
 };
+
+static void TimingStatsReset(struct TimingStats* timing_stats) {
+  *timing_stats = (struct TimingStats){.min = ULLONG_MAX};
+}
+
+static void TimingStatsRecord(struct TimingStats* timing_stats,
+                              unsigned long long value) {
+  timing_stats->min = MIN(timing_stats->min, value);
+  timing_stats->max = MAX(timing_stats->max, value);
+  timing_stats->sum += value;
+}
+
+static void TimingStatsLog(const struct TimingStats* timing_stats,
+                           const char* name, unsigned long long counter) {
+  LOG("%s min/avg/max: %llu/%llu/%llu", name, timing_stats->min,
+      timing_stats->sum / counter, timing_stats->max);
+}
+
+static unsigned long long MicrosNow(void) {
+  struct timespec ts = {.tv_sec = 0, .tv_nsec = 0};
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (unsigned long long)ts.tv_sec * 1000000ull +
+         (unsigned long long)ts.tv_nsec / 1000ull;
+}
 
 static void SurfaceDestroy(struct Surface*** psurfaces) {
   if (!psurfaces || !*psurfaces) return;
@@ -236,6 +279,11 @@ struct DecodeContext* DecodeContextCreate(void) {
     LOG("Failed to set frame allocator (%d)", status);
     return NULL;
   }
+
+  decode_context->recording_started = MicrosNow();
+  TimingStatsReset(&decode_context->receive);
+  TimingStatsReset(&decode_context->decode);
+  TimingStatsReset(&decode_context->total);
   return RELEASE(decode_context);
 }
 
@@ -282,6 +330,7 @@ again:;
   if (!decode_context->packet_size) {
     target = &decode_context->packet_size;
     size = sizeof(decode_context->packet_size);
+    decode_context->frame_header_ts = MicrosNow();
   } else {
     target = decode_context->packet_data + decode_context->packet_offset;
     size = decode_context->packet_size - decode_context->packet_offset;
@@ -336,6 +385,40 @@ static void UnlockAllSurfaces(struct DecodeContext* decode_context,
   }
 }
 
+void HandleTimingStats(struct DecodeContext* decode_context) {
+  TimingStatsRecord(
+      &decode_context->receive,
+      decode_context->frame_received_ts - decode_context->frame_header_ts);
+  TimingStatsRecord(
+      &decode_context->decode,
+      decode_context->frame_decoded_ts - decode_context->frame_received_ts);
+  TimingStatsRecord(
+      &decode_context->total,
+      decode_context->frame_received_ts - decode_context->frame_header_ts);
+
+  unsigned long long period =
+      decode_context->frame_decoded_ts - decode_context->recording_started;
+  static const unsigned long long second = 1000000;
+  if (period < 10 * second) return;
+
+  LOG("---->8-------->8-------->8----");
+  TimingStatsLog(&decode_context->receive, "Receive",
+                 decode_context->frame_counter);
+  TimingStatsLog(&decode_context->decode, "Decode",
+                 decode_context->frame_counter);
+  TimingStatsLog(&decode_context->total, "Total",
+                 decode_context->frame_counter);
+  LOG("Framerate: %llu fps", decode_context->frame_counter * second / period);
+  LOG("Bitstream: %llu Kbps",
+      decode_context->bitstream * second * 8 / period / 1024);
+  decode_context->recording_started = decode_context->frame_decoded_ts;
+  TimingStatsReset(&decode_context->receive);
+  TimingStatsReset(&decode_context->decode);
+  TimingStatsReset(&decode_context->total);
+  decode_context->frame_counter = 0;
+  decode_context->bitstream = 0;
+}
+
 bool DecodeContextDecode(struct DecodeContext* decode_context, int fd) {
   if (!ReadSomePacketData(decode_context, fd)) {
     LOG("Failed to read some packet data");
@@ -356,6 +439,8 @@ bool DecodeContextDecode(struct DecodeContext* decode_context, int fd) {
   };
   decode_context->packet_size = 0;
   decode_context->packet_offset = 0;
+  decode_context->frame_received_ts = MicrosNow();
+  decode_context->bitstream += bitstream.DataLength;
 
   if (!decode_context->initialized) {
     if (!InitializeDecoder(decode_context, &bitstream)) {
@@ -399,6 +484,10 @@ bool DecodeContextDecode(struct DecodeContext* decode_context, int fd) {
     surface = surface_out->Data.MemId;
     decode_context->decoded = surface->frame;
     UnlockAllSurfaces(decode_context, surface);
+
+    decode_context->frame_decoded_ts = MicrosNow();
+    decode_context->frame_counter++;
+    HandleTimingStats(decode_context);
     return true;
   }
 }
