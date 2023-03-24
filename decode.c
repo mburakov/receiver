@@ -299,7 +299,7 @@ struct DecodeContext* DecodeContextCreate(struct Window* window) {
 static bool InitializeDecoder(struct DecodeContext* decode_context,
                               mfxBitstream* bitstream) {
   mfxVideoParam video_param = {
-      .mfx.CodecId = MFX_CODEC_AVC,
+      .mfx.CodecId = MFX_CODEC_HEVC,
   };
   mfxStatus status = MFXVideoDECODE_DecodeHeader(decode_context->session,
                                                  bitstream, &video_param);
@@ -481,6 +481,9 @@ bool DecodeContextDecode(struct DecodeContext* decode_context, int fd) {
         continue;
       case MFX_ERR_NONE:
         break;
+      case MFX_WRN_DEVICE_BUSY:
+        usleep(500);
+        __attribute__((fallthrough));
       case MFX_WRN_VIDEO_PARAM_CHANGED:
         continue;
       default:
