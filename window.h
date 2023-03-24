@@ -19,6 +19,7 @@
 #define RECEIVER_WINDOW_H_
 
 #include <stdbool.h>
+#include <stddef.h>
 
 struct Window;
 struct Frame;
@@ -26,7 +27,9 @@ struct Frame;
 struct Window* WindowCreate(void);
 int WindowGetEventsFd(const struct Window* window);
 bool WindowProcessEvents(const struct Window* window);
-bool WindowRenderFrame(struct Window* window, const struct Frame* frame);
+bool WindowAssignFrames(struct Window* window, size_t nframes,
+                        const struct Frame* frames);
+bool WindowShowFrame(struct Window* window, size_t index);
 void WindowDestroy(struct Window** window);
 
 #endif  // RECEIVER_WINDOW_H_

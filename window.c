@@ -37,7 +37,7 @@ struct Window {
   struct zwp_linux_dmabuf_v1* zwp_linux_dmabuf_v1;
   struct xdg_surface* xdg_surface;
   struct xdg_toplevel* xdg_toplevel;
-  struct wl_buffer* wl_buffer;
+  struct wl_buffer** wl_buffers;
 };
 
 static void wl_registryDestroy(struct wl_registry** wl_registry) {
@@ -163,20 +163,11 @@ static void OnToplevelWmCapabilities(void* data,
 }
 
 struct Window* WindowCreate(void) {
-  struct AUTO(Window)* window = malloc(sizeof(struct Window));
+  struct AUTO(Window)* window = calloc(1, sizeof(struct Window));
   if (!window) {
     LOG("Failed to allocate window (%s)", strerror(errno));
     return NULL;
   }
-  *window = (struct Window){
-      .wl_display = NULL,
-      .wl_surface = NULL,
-      .xdg_wm_base = NULL,
-      .zwp_linux_dmabuf_v1 = NULL,
-      .xdg_surface = NULL,
-      .xdg_toplevel = NULL,
-      .wl_buffer = NULL,
-  };
 
   window->wl_display = wl_display_connect(NULL);
   if (!window->wl_display) {
@@ -272,12 +263,20 @@ static void OnZwpLinuxBufferParamsFailed(
   (void)zwp_linux_buffer_params_v1;
 }
 
-bool WindowRenderFrame(struct Window* window, const struct Frame* frame) {
+static void DestroyBuffers(struct Window* window) {
+  if (!window->wl_buffers) return;
+  for (size_t i = 0; window->wl_buffers[i]; i++)
+    wl_buffer_destroy(window->wl_buffers[i]);
+  free(RELEASE(window->wl_buffers));
+}
+
+static struct wl_buffer* CreateBuffer(struct Window* window,
+                                      const struct Frame* frame) {
   struct AUTO(zwp_linux_buffer_params_v1)* zwp_linux_buffer_params_v1 =
       zwp_linux_dmabuf_v1_create_params(window->zwp_linux_dmabuf_v1);
   if (!zwp_linux_buffer_params_v1) {
     LOG("Failed to create wayland dmabuf params (%s)", strerror(errno));
-    return false;
+    return NULL;
   }
 
   struct AUTO(wl_buffer)* wl_buffer = NULL;
@@ -291,7 +290,7 @@ bool WindowRenderFrame(struct Window* window, const struct Frame* frame) {
           &wl_buffer)) {
     LOG("Failed to add buffer wayland dmabuf params listener (%s)",
         strerror(errno));
-    return false;
+    return NULL;
   }
 
   for (size_t i = 0; i < frame->nplanes; i++) {
@@ -306,26 +305,47 @@ bool WindowRenderFrame(struct Window* window, const struct Frame* frame) {
                                     frame->fourcc, 0);
   if (wl_display_roundtrip(window->wl_display) == -1) {
     LOG("Failed to roundtrip wayland display (%s)", strerror(errno));
-    return false;
+    return NULL;
   }
   if (!wl_buffer) {
     LOG("Failed to create wl_buffer");
-    return false;
+    return NULL;
   }
 
-  SWAP(window->wl_buffer, wl_buffer);
-  wl_surface_attach(window->wl_surface, window->wl_buffer, 0, 0);
-  wl_surface_damage(window->wl_surface, 0, 0, INT32_MAX, INT32_MAX);
-  wl_surface_commit(window->wl_surface);
-  if (wl_display_roundtrip(window->wl_display) == -1) {
-    LOG("Failed to roundtrip wayland display (%s)", strerror(errno));
+  return RELEASE(wl_buffer);
+}
+
+bool WindowAssignFrames(struct Window* window, size_t nframes,
+                        const struct Frame* frames) {
+  DestroyBuffers(window);
+  window->wl_buffers = calloc(nframes + 1, sizeof(struct wl_buffer*));
+  if (!window->wl_buffers) {
+    LOG("Failed to alloc window buffers (%s)", strerror(errno));
     return false;
+  }
+  for (size_t i = 0; i < nframes; i++) {
+    window->wl_buffers[i] = CreateBuffer(window, &frames[i]);
+    if (!window->wl_buffers[i]) {
+      LOG("Failed to create window buffer");
+      DestroyBuffers(window);
+      return false;
+    }
   }
   return true;
 }
 
+bool WindowShowFrame(struct Window* window, size_t index) {
+  wl_surface_attach(window->wl_surface, window->wl_buffers[index], 0, 0);
+  wl_surface_damage(window->wl_surface, 0, 0, INT32_MAX, INT32_MAX);
+  wl_surface_commit(window->wl_surface);
+  bool result = wl_display_roundtrip(window->wl_display) != -1;
+  if (!result) LOG("Failed to roundtrip wayland display (%s)", strerror(errno));
+  return result;
+}
+
 void WindowDestroy(struct Window** window) {
   if (!window || !*window) return;
+  DestroyBuffers(*window);
   if ((*window)->xdg_toplevel) xdg_toplevel_destroy((*window)->xdg_toplevel);
   if ((*window)->xdg_surface) xdg_surface_destroy((*window)->xdg_surface);
   if ((*window)->zwp_linux_dmabuf_v1)

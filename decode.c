@@ -33,6 +33,7 @@
 
 #include "frame.h"
 #include "util.h"
+#include "window.h"
 
 struct Surface {
   VASurfaceID surface_id;
@@ -48,6 +49,7 @@ struct TimingStats {
 };
 
 struct DecodeContext {
+  struct Window* window;
   int drm_fd;
   VADisplay display;
   mfxSession session;
@@ -59,7 +61,6 @@ struct DecodeContext {
   uint32_t packet_alloc;
   uint32_t packet_offset;
   struct Surface** sufaces;
-  struct Frame* decoded;
 
   unsigned long long recording_started;
   unsigned long long frame_header_ts;
@@ -189,6 +190,7 @@ static mfxStatus OnAllocatorAlloc(mfxHDL pthis, mfxFrameAllocRequest* request,
   }
 
   // mburakov: Separate loop for frames to ensure proper cleanup in destructor.
+  struct Frame frames[request->NumFrameSuggested];
   for (size_t i = 0; i < request->NumFrameSuggested; i++) {
     surfaces[i]->frame =
         ExportFrame(decode_context->display, surfaces[i]->surface_id);
@@ -196,6 +198,12 @@ static mfxStatus OnAllocatorAlloc(mfxHDL pthis, mfxFrameAllocRequest* request,
       LOG("Failed to export frame");
       return MFX_ERR_MEMORY_ALLOC;
     }
+    frames[i] = *surfaces[i]->frame;
+  }
+  if (!WindowAssignFrames(decode_context->window, request->NumFrameSuggested,
+                          frames)) {
+    LOG("Failed to assign frames to window");
+    return MFX_ERR_MEMORY_ALLOC;
   }
 
   decode_context->sufaces = RELEASE(surfaces);
@@ -228,7 +236,7 @@ static mfxStatus OnAllocatorFree(mfxHDL pthis,
   return MFX_ERR_NONE;
 }
 
-struct DecodeContext* DecodeContextCreate(void) {
+struct DecodeContext* DecodeContextCreate(struct Window* window) {
   struct AUTO(DecodeContext)* decode_context =
       malloc(sizeof(struct DecodeContext));
   if (!decode_context) {
@@ -236,6 +244,7 @@ struct DecodeContext* DecodeContextCreate(void) {
     return NULL;
   }
   *decode_context = (struct DecodeContext){
+      .window = window,
       .drm_fd = -1,
       .allocator.pthis = decode_context,
       .allocator.Alloc = OnAllocatorAlloc,
@@ -377,15 +386,20 @@ static struct Surface* GetFreeSurface(struct DecodeContext* decode_context) {
   return *psurface;
 }
 
-static void UnlockAllSurfaces(struct DecodeContext* decode_context,
-                              const struct Surface* keep_locked) {
-  struct Surface** psurface = decode_context->sufaces;
-  for (; *psurface; psurface++) {
-    if (*psurface != keep_locked) (*psurface)->locked = false;
+static size_t UnlockAllSurfaces(struct DecodeContext* decode_context,
+                                const struct Surface* keep_locked) {
+  size_t result = 0;
+  for (size_t i = 0; decode_context->sufaces[i]; i++) {
+    if (decode_context->sufaces[i] != keep_locked) {
+      decode_context->sufaces[i]->locked = false;
+    } else {
+      result = i;
+    }
   }
+  return result;
 }
 
-void HandleTimingStats(struct DecodeContext* decode_context) {
+static void HandleTimingStats(struct DecodeContext* decode_context) {
   TimingStatsRecord(
       &decode_context->receive,
       decode_context->frame_received_ts - decode_context->frame_header_ts);
@@ -481,20 +495,17 @@ bool DecodeContextDecode(struct DecodeContext* decode_context, int fd) {
       return false;
     }
 
-    surface = surface_out->Data.MemId;
-    decode_context->decoded = surface->frame;
-    UnlockAllSurfaces(decode_context, surface);
+    size_t locked = UnlockAllSurfaces(decode_context, surface_out->Data.MemId);
+    if (!WindowShowFrame(decode_context->window, locked)) {
+      LOG("Failed to show frame");
+      return false;
+    }
 
     decode_context->frame_decoded_ts = MicrosNow();
     decode_context->frame_counter++;
     HandleTimingStats(decode_context);
     return true;
   }
-}
-
-const struct Frame* DecodeContextGetFrame(
-    struct DecodeContext* decode_context) {
-  return decode_context->decoded;
 }
 
 void DecodeContextDestroy(struct DecodeContext** decode_context) {

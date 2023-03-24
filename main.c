@@ -35,15 +35,15 @@ int main(int argc, char* argv[]) {
   (void)argc;
   (void)argv;
 
-  struct AUTO(DecodeContext)* decode_context = DecodeContextCreate();
-  if (!decode_context) {
-    LOG("Failed to create decode context");
-    return EXIT_FAILURE;
-  }
-
   struct AUTO(Window)* window = WindowCreate();
   if (!window) {
     LOG("Failed to create window");
+    return EXIT_FAILURE;
+  }
+
+  struct AUTO(DecodeContext)* decode_context = DecodeContextCreate(window);
+  if (!decode_context) {
+    LOG("Failed to create decode context");
     return EXIT_FAILURE;
   }
 
@@ -82,11 +82,6 @@ int main(int argc, char* argv[]) {
     }
     if (pfds[1].revents && !WindowProcessEvents(window)) {
       LOG("Failed to process window events");
-      return EXIT_FAILURE;
-    }
-    const struct Frame* frame = DecodeContextGetFrame(decode_context);
-    if (frame && !WindowRenderFrame(window, frame)) {
-      LOG("Failed to render frame");
       return EXIT_FAILURE;
     }
   }

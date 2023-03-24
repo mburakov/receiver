@@ -23,10 +23,10 @@
 
 struct DecodeContext;
 struct Frame;
+struct Window;
 
-struct DecodeContext* DecodeContextCreate(void);
+struct DecodeContext* DecodeContextCreate(struct Window* window);
 bool DecodeContextDecode(struct DecodeContext* decode_context, int fd);
-const struct Frame* DecodeContextGetFrame(struct DecodeContext* decode_context);
 void DecodeContextDestroy(struct DecodeContext** decode_context);
 
 #endif  // RECEIVER_DECODE_H_
