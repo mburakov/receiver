@@ -408,7 +408,7 @@ static void HandleTimingStats(struct DecodeContext* decode_context) {
       decode_context->frame_decoded_ts - decode_context->frame_received_ts);
   TimingStatsRecord(
       &decode_context->total,
-      decode_context->frame_received_ts - decode_context->frame_header_ts);
+      decode_context->frame_decoded_ts - decode_context->frame_header_ts);
 
   unsigned long long period =
       decode_context->frame_decoded_ts - decode_context->recording_started;
