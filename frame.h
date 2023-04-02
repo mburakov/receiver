@@ -18,7 +18,6 @@
 #ifndef RECEIVER_FRAME_H_
 #define RECEIVER_FRAME_H_
 
-#include <stddef.h>
 #include <stdint.h>
 
 struct FramePlane {
@@ -36,8 +35,7 @@ struct Frame {
   struct FramePlane planes[4];
 };
 
-struct Frame* FrameCreate(uint32_t width, uint32_t height, uint32_t fourcc,
-                          uint32_t nplanes, const struct FramePlane* planes);
-void FrameDestroy(struct Frame** frame);
+void FrameReset(struct Frame* frame, uint32_t width, uint32_t height,
+                uint32_t fourcc, uint32_t nplanes);
 
 #endif  // RECEIVER_FRAME_H_

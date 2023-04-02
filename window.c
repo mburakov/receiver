@@ -26,7 +26,7 @@
 
 #include "frame.h"
 #include "linux-dmabuf-unstable-v1.h"
-#include "util.h"
+#include "toolbox/utils.h"
 #include "xdg-shell.h"
 
 // TODO(mburakov): This would look like shit until Wayland guys finally fix

@@ -25,7 +25,7 @@
 #include <unistd.h>
 
 #include "decode.h"
-#include "util.h"
+#include "toolbox/utils.h"
 #include "window.h"
 
 static volatile sig_atomic_t g_signal;
@@ -46,6 +46,12 @@ static void WindowDtor(struct Window** window) {
   *window = NULL;
 }
 
+static void DecodeContextDtor(struct DecodeContext** decode_context) {
+  if (!*decode_context) return;
+  DecodeContextDestroy(*decode_context);
+  *decode_context = NULL;
+}
+
 int main(int argc, char* argv[]) {
   (void)argc;
   (void)argv;
@@ -61,7 +67,9 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
-  struct AUTO(DecodeContext)* decode_context = DecodeContextCreate(window);
+  struct DecodeContext
+      __attribute__((cleanup(DecodeContextDtor)))* decode_context =
+          DecodeContextCreate(window);
   if (!decode_context) {
     LOG("Failed to create decode context");
     return EXIT_FAILURE;

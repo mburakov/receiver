@@ -2,6 +2,9 @@ bin:=$(notdir $(shell pwd))
 src:=$(wildcard *.c)
 obj:=$(src:.c=.o)
 
+obj+=\
+	toolbox/buffer.o
+
 libs:=\
 	libva \
 	libva-drm \

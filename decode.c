@@ -19,121 +19,157 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <limits.h>
 #include <mfxvideo.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
 #include <va/va.h>
 #include <va/va_drm.h>
 #include <va/va_drmcommon.h>
 
 #include "frame.h"
-#include "util.h"
+#include "toolbox/buffer.h"
+#include "toolbox/utils.h"
 #include "window.h"
 
 struct Surface {
-  VASurfaceID surface_id;
-  mfxFrameInfo frame_info;
-  struct Frame* frame;
+  mfxFrameInfo mfx_frame_info;
+  VASurfaceID va_surface_id;
+  int dmabuf_fds[4];
   bool locked;
-};
-
-struct TimingStats {
-  unsigned long long min;
-  unsigned long long max;
-  unsigned long long sum;
 };
 
 struct DecodeContext {
   struct Window* window;
-  int drm_fd;
-  VADisplay display;
-  mfxSession session;
   mfxFrameAllocator allocator;
-  bool initialized;
 
-  uint32_t packet_size;
-  uint8_t* packet_data;
-  uint32_t packet_alloc;
-  uint32_t packet_offset;
-  struct Surface** sufaces;
+  int drm_fd;
+  VADisplay va_display;
+  mfxSession mfx_session;
 
-  unsigned long long recording_started;
-  unsigned long long frame_header_ts;
-  unsigned long long frame_received_ts;
-  unsigned long long frame_decoded_ts;
-  unsigned long long frame_counter;
-  unsigned long long bitstream;
-
-  struct TimingStats receive;
-  struct TimingStats decode;
-  struct TimingStats total;
+  struct Buffer buffer;
+  struct Surface** surfaces;
 };
 
-static void TimingStatsReset(struct TimingStats* timing_stats) {
-  *timing_stats = (struct TimingStats){.min = ULLONG_MAX};
+static const char* VaStatusString(VAStatus status) {
+  static const char* va_status_strings[] = {
+      "VA_STATUS_SUCCESS",
+      "VA_STATUS_ERROR_OPERATION_FAILED",
+      "VA_STATUS_ERROR_ALLOCATION_FAILED",
+      "VA_STATUS_ERROR_INVALID_DISPLAY",
+      "VA_STATUS_ERROR_INVALID_CONFIG",
+      "VA_STATUS_ERROR_INVALID_CONTEXT",
+      "VA_STATUS_ERROR_INVALID_SURFACE",
+      "VA_STATUS_ERROR_INVALID_BUFFER",
+      "VA_STATUS_ERROR_INVALID_IMAGE",
+      "VA_STATUS_ERROR_INVALID_SUBPICTURE",
+      "VA_STATUS_ERROR_ATTR_NOT_SUPPORTED",
+      "VA_STATUS_ERROR_MAX_NUM_EXCEEDED",
+      "VA_STATUS_ERROR_UNSUPPORTED_PROFILE",
+      "VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT",
+      "VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT",
+      "VA_STATUS_ERROR_UNSUPPORTED_BUFFERTYPE",
+      "VA_STATUS_ERROR_SURFACE_BUSY",
+      "VA_STATUS_ERROR_FLAG_NOT_SUPPORTED",
+      "VA_STATUS_ERROR_INVALID_PARAMETER",
+      "VA_STATUS_ERROR_RESOLUTION_NOT_SUPPORTED",
+      "VA_STATUS_ERROR_UNIMPLEMENTED",
+      "VA_STATUS_ERROR_SURFACE_IN_DISPLAYING",
+      "VA_STATUS_ERROR_INVALID_IMAGE_FORMAT",
+      "VA_STATUS_ERROR_DECODING_ERROR",
+      "VA_STATUS_ERROR_ENCODING_ERROR",
+      "VA_STATUS_ERROR_INVALID_VALUE",
+      "???",
+      "???",
+      "???",
+      "???",
+      "???",
+      "???",
+      "VA_STATUS_ERROR_UNSUPPORTED_FILTER",
+      "VA_STATUS_ERROR_INVALID_FILTER_CHAIN",
+      "VA_STATUS_ERROR_HW_BUSY",
+      "???",
+      "VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE",
+      "VA_STATUS_ERROR_NOT_ENOUGH_BUFFER",
+      "VA_STATUS_ERROR_TIMEDOUT",
+  };
+  return (VA_STATUS_SUCCESS <= status && status <= VA_STATUS_ERROR_TIMEDOUT)
+             ? va_status_strings[status - VA_STATUS_SUCCESS]
+             : "???";
 }
 
-static void TimingStatsRecord(struct TimingStats* timing_stats,
-                              unsigned long long value) {
-  timing_stats->min = MIN(timing_stats->min, value);
-  timing_stats->max = MAX(timing_stats->max, value);
-  timing_stats->sum += value;
-}
-
-static void TimingStatsLog(const struct TimingStats* timing_stats,
-                           const char* name, unsigned long long counter) {
-  LOG("%s min/avg/max: %llu/%llu/%llu", name, timing_stats->min,
-      timing_stats->sum / counter, timing_stats->max);
-}
-
-static unsigned long long MicrosNow(void) {
-  struct timespec ts = {.tv_sec = 0, .tv_nsec = 0};
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (unsigned long long)ts.tv_sec * 1000000ull +
-         (unsigned long long)ts.tv_nsec / 1000ull;
-}
-
-static void SurfaceDestroy(struct Surface*** psurfaces) {
-  if (!psurfaces || !*psurfaces) return;
-  for (struct Surface** surfaces = *psurfaces; *surfaces; surfaces++) {
-    if ((*surfaces)->frame) FrameDestroy(&(*surfaces)->frame);
-    free(*surfaces);
-  }
-  free(*psurfaces);
-  *psurfaces = NULL;
-}
-
-static struct Frame* ExportFrame(VADisplay display, VASurfaceID surface_id) {
-  VADRMPRIMESurfaceDescriptor prime;
-  VAStatus status = vaExportSurfaceHandle(
-      display, surface_id, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-      VA_EXPORT_SURFACE_WRITE_ONLY | VA_EXPORT_SURFACE_COMPOSED_LAYERS, &prime);
-  if (status != VA_STATUS_SUCCESS) {
-    LOG("Failed to export vaapi surface (%d)", status);
+static struct Surface* SurfaceCreate(const mfxFrameInfo* mfx_frame_info,
+                                     VADisplay va_display,
+                                     struct Frame* out_frame) {
+  struct Surface* surface = malloc(sizeof(struct Surface));
+  if (!surface) {
+    LOG("Failed to allocate surface (%s)", strerror(errno));
     return NULL;
   }
+  *surface = (struct Surface){
+      .mfx_frame_info = *mfx_frame_info,
+      .dmabuf_fds = {-1, -1, -1, -1},
+  };
 
-  struct FramePlane planes[prime.layers[0].num_planes];
-  for (size_t i = 0; i < LENGTH(planes); i++) {
-    planes[i] = (struct FramePlane){
-        .dmabuf_fd = prime.objects[prime.layers[0].object_index[i]].fd,
+  VASurfaceAttrib attrib_list[] = {
+      {.type = VASurfaceAttribPixelFormat,
+       .value.type = VAGenericValueTypeInteger,
+       .value.value.i = VA_FOURCC_NV12},
+      {.type = VASurfaceAttribUsageHint,
+       .value.type = VAGenericValueTypeInteger,
+       .value.value.i = VA_SURFACE_ATTRIB_USAGE_HINT_DECODER |
+                        VA_SURFACE_ATTRIB_USAGE_HINT_EXPORT},
+  };
+  VAStatus va_status =
+      vaCreateSurfaces(va_display, VA_RT_FORMAT_YUV420, mfx_frame_info->Width,
+                       mfx_frame_info->Height, &surface->va_surface_id, 1,
+                       attrib_list, LENGTH(attrib_list));
+  if (va_status != VA_STATUS_SUCCESS) {
+    LOG("Failed to create vaapi surface (%s)", VaStatusString(va_status));
+    goto rollback_surface;
+  }
+
+  VADRMPRIMESurfaceDescriptor prime;
+  va_status = vaExportSurfaceHandle(
+      va_display, surface->va_surface_id,
+      VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+      VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_COMPOSED_LAYERS, &prime);
+  if (va_status != VA_STATUS_SUCCESS) {
+    LOG("Failed to export vaapi surface (%s)", VaStatusString(va_status));
+    goto rollback_va_surface_id;
+  }
+
+  out_frame->width = prime.width;
+  out_frame->height = prime.height;
+  out_frame->fourcc = prime.fourcc;
+  out_frame->nplanes = prime.layers[0].num_planes;
+  for (uint32_t i = 0; i < prime.layers[0].num_planes; i++) {
+    surface->dmabuf_fds[i] = prime.objects[prime.layers[0].object_index[i]].fd;
+    out_frame->planes[i] = (struct FramePlane){
+        .dmabuf_fd = surface->dmabuf_fds[i],
         .pitch = prime.layers[0].pitch[i],
         .offset = prime.layers[0].offset[i],
         .modifier =
             prime.objects[prime.layers[0].object_index[i]].drm_format_modifier,
     };
   }
+  return surface;
 
-  struct Frame* frame = FrameCreate(prime.width, prime.height, prime.fourcc,
-                                    prime.layers[0].num_planes, planes);
-  if (!frame) LOG("Failed to create frame");
-  for (size_t i = prime.num_objects; i; i--) close(prime.objects[i - 1].fd);
-  return frame;
+rollback_va_surface_id:
+  vaDestroySurfaces(va_display, &surface->va_surface_id, 1);
+rollback_surface:
+  free(surface);
+  return NULL;
+}
+
+static void SurfaceDestroy(struct Surface* surface, VADisplay va_display) {
+  for (size_t i = LENGTH(surface->dmabuf_fds); i; i--) {
+    if (surface->dmabuf_fds[i - 1] != -1) close(surface->dmabuf_fds[i - 1]);
+  }
+  vaDestroySurfaces(va_display, &surface->va_surface_id, 1);
+  free(surface);
 }
 
 static mfxStatus OnAllocatorAlloc(mfxHDL pthis, mfxFrameAllocRequest* request,
@@ -150,102 +186,116 @@ static mfxStatus OnAllocatorAlloc(mfxHDL pthis, mfxFrameAllocRequest* request,
     return MFX_ERR_UNSUPPORTED;
   }
 
-  struct AUTO(Surface)** surfaces =
+  struct DecodeContext* decode_context = pthis;
+  decode_context->surfaces =
       calloc(request->NumFrameSuggested + 1, sizeof(struct Surface*));
-  if (!surfaces) {
+  if (!decode_context->surfaces) {
     LOG("Failed to allocate surfaces storage (%s)", strerror(errno));
     return MFX_ERR_MEMORY_ALLOC;
   }
-  for (size_t i = 0; i < request->NumFrameSuggested; i++) {
-    surfaces[i] = calloc(1, sizeof(struct Surface));
-    if (!surfaces[i]) {
-      LOG("Failed to allocate surface (%s)", strerror(errno));
-      return MFX_ERR_MEMORY_ALLOC;
-    }
-  }
 
-  VASurfaceID surface_ids[request->NumFrameSuggested];
-  struct DecodeContext* decode_context = pthis;
-  VASurfaceAttrib attrib_list[] = {
-      {.type = VASurfaceAttribPixelFormat,
-       .value.type = VAGenericValueTypeInteger,
-       .value.value.i = VA_FOURCC_NV12},
-      {.type = VASurfaceAttribUsageHint,
-       .value.type = VAGenericValueTypeInteger,
-       .value.value.i = VA_SURFACE_ATTRIB_USAGE_HINT_DECODER |
-                        VA_SURFACE_ATTRIB_USAGE_HINT_EXPORT},
-  };
-  VAStatus status = vaCreateSurfaces(
-      decode_context->display, VA_RT_FORMAT_YUV420, request->Info.Width,
-      request->Info.Height, surface_ids, request->NumFrameSuggested,
-      attrib_list, LENGTH(attrib_list));
-  if (status != VA_STATUS_SUCCESS) {
-    LOG("Failed to allocate surfaces (%d)", status);
-    return MFX_ERR_MEMORY_ALLOC;
-  }
-
-  for (size_t i = 0; i < request->NumFrameSuggested; i++) {
-    surfaces[i]->surface_id = surface_ids[i];
-    surfaces[i]->frame_info = request->Info;
-  }
-
-  // mburakov: Separate loop for frames to ensure proper cleanup in destructor.
   struct Frame frames[request->NumFrameSuggested];
   for (size_t i = 0; i < request->NumFrameSuggested; i++) {
-    surfaces[i]->frame =
-        ExportFrame(decode_context->display, surfaces[i]->surface_id);
-    if (!surfaces[i]->frame) {
-      LOG("Failed to export frame");
-      return MFX_ERR_MEMORY_ALLOC;
+    decode_context->surfaces[i] =
+        SurfaceCreate(&request->Info, decode_context->va_display, &frames[i]);
+    if (!decode_context->surfaces[i]) {
+      LOG("Failed to create surface");
+      goto rollback_surfaces;
     }
-    frames[i] = *surfaces[i]->frame;
   }
+
   if (!WindowAssignFrames(decode_context->window, request->NumFrameSuggested,
                           frames)) {
     LOG("Failed to assign frames to window");
-    return MFX_ERR_MEMORY_ALLOC;
+    goto rollback_surfaces;
   }
 
-  decode_context->sufaces = RELEASE(surfaces);
   *response = (mfxFrameAllocResponse){
       .AllocId = request->AllocId,
-      .mids = (void**)decode_context->sufaces,
+      .mids = (void**)decode_context->surfaces,
       .NumFrameActual = request->NumFrameSuggested,
   };
   return MFX_ERR_NONE;
+
+rollback_surfaces:
+  for (size_t i = request->NumFrameSuggested; i; i--) {
+    if (decode_context->surfaces[i - 1])
+      SurfaceDestroy(decode_context->surfaces[i - 1],
+                     decode_context->va_display);
+  }
+  free(decode_context->surfaces);
+  return MFX_ERR_MEMORY_ALLOC;
 }
 
 static mfxStatus OnAllocatorGetHDL(mfxHDL pthis, mfxMemId mid, mfxHDL* handle) {
   (void)pthis;
   struct Surface* surface = mid;
-  *handle = &surface->surface_id;
+  *handle = &surface->va_surface_id;
   return MFX_ERR_NONE;
 }
 
 static mfxStatus OnAllocatorFree(mfxHDL pthis,
                                  mfxFrameAllocResponse* response) {
   LOG("%s(AllocId=%u)", __func__, response->AllocId);
-  VASurfaceID surface_ids[response->NumFrameActual];
-  struct Surface** surfaces = (struct Surface**)response->mids;
-  for (size_t i = 0; i < response->NumFrameActual; i++)
-    surface_ids[i] = surfaces[i]->surface_id;
   struct DecodeContext* decode_context = pthis;
-  vaDestroySurfaces(decode_context->display, surface_ids,
-                    response->NumFrameActual);
-  SurfaceDestroy(&decode_context->sufaces);
+  for (size_t i = response->NumFrameActual; i; i--)
+    SurfaceDestroy(decode_context->surfaces[i - 1], decode_context->va_display);
+  free(decode_context->surfaces);
   return MFX_ERR_NONE;
 }
 
+static const char* MfxStatusString(mfxStatus status) {
+  static const char* mfx_status_strings[] = {
+      "MFX_ERR_REALLOC_SURFACE",
+      "MFX_ERR_GPU_HANG",
+      "MFX_ERR_INVALID_AUDIO_PARAM",
+      "MFX_ERR_INCOMPATIBLE_AUDIO_PARAM",
+      "MFX_ERR_MORE_BITSTREAM",
+      "MFX_ERR_DEVICE_FAILED",
+      "MFX_ERR_UNDEFINED_BEHAVIOR",
+      "MFX_ERR_INVALID_VIDEO_PARAM",
+      "MFX_ERR_INCOMPATIBLE_VIDEO_PARAM",
+      "MFX_ERR_DEVICE_LOST",
+      "MFX_ERR_ABORTED",
+      "MFX_ERR_MORE_SURFACE",
+      "MFX_ERR_MORE_DATA",
+      "MFX_ERR_NOT_FOUND",
+      "MFX_ERR_NOT_INITIALIZED",
+      "MFX_ERR_LOCK_MEMORY",
+      "MFX_ERR_INVALID_HANDLE",
+      "MFX_ERR_NOT_ENOUGH_BUFFER",
+      "MFX_ERR_MEMORY_ALLOC",
+      "MFX_ERR_UNSUPPORTED",
+      "MFX_ERR_NULL_PTR",
+      "MFX_ERR_UNKNOWN",
+      "MFX_ERR_NONE",
+      "MFX_WRN_IN_EXECUTION",
+      "MFX_WRN_DEVICE_BUSY",
+      "MFX_WRN_VIDEO_PARAM_CHANGED",
+      "MFX_WRN_PARTIAL_ACCELERATION",
+      "MFX_WRN_INCOMPATIBLE_VIDEO_PARAM",
+      "MFX_WRN_VALUE_NOT_CHANGED",
+      "MFX_WRN_OUT_OF_RANGE",
+      "MFX_TASK_WORKING",
+      "MFX_TASK_BUSY",
+      "MFX_WRN_FILTER_SKIPPED",
+      "MFX_WRN_INCOMPATIBLE_AUDIO_PARAM",
+      "MFX_ERR_NONE_PARTIAL_OUTPUT",
+  };
+  return (MFX_ERR_REALLOC_SURFACE <= status &&
+          status <= MFX_ERR_NONE_PARTIAL_OUTPUT)
+             ? mfx_status_strings[status - MFX_ERR_REALLOC_SURFACE]
+             : "???";
+}
+
 struct DecodeContext* DecodeContextCreate(struct Window* window) {
-  struct AUTO(DecodeContext)* decode_context =
-      malloc(sizeof(struct DecodeContext));
+  struct DecodeContext* decode_context = malloc(sizeof(struct DecodeContext));
   if (!decode_context) {
     LOG("Failed to allocate decode context (%s)", strerror(errno));
     return NULL;
   }
   *decode_context = (struct DecodeContext){
       .window = window,
-      .drm_fd = -1,
       .allocator.pthis = decode_context,
       .allocator.Alloc = OnAllocatorAlloc,
       .allocator.GetHDL = OnAllocatorGetHDL,
@@ -255,45 +305,52 @@ struct DecodeContext* DecodeContextCreate(struct Window* window) {
   decode_context->drm_fd = open("/dev/dri/renderD128", O_RDWR);
   if (decode_context->drm_fd == -1) {
     LOG("Failed to open render node (%s)", strerror(errno));
-    return NULL;
+    goto rollback_decode_context;
   }
 
-  decode_context->display = vaGetDisplayDRM(decode_context->drm_fd);
-  if (!decode_context->display) {
+  decode_context->va_display = vaGetDisplayDRM(decode_context->drm_fd);
+  if (!decode_context->va_display) {
     LOG("Failed to get vaapi display (%s)", strerror(errno));
-    return NULL;
+    goto rollback_drm_fd;
   }
   int major, minor;
-  VAStatus st = vaInitialize(decode_context->display, &major, &minor);
-  if (st != VA_STATUS_SUCCESS) {
-    LOG("Failed to init vaapi (%d)", st);
-    return NULL;
+  VAStatus va_status = vaInitialize(decode_context->va_display, &major, &minor);
+  if (va_status != VA_STATUS_SUCCESS) {
+    LOG("Failed to init vaapi (%s)", VaStatusString(va_status));
+    goto rollback_display;
   }
 
   LOG("Initialized vaapi %d.%d", major, minor);
-  mfxStatus status = MFXInit(MFX_IMPL_HARDWARE, NULL, &decode_context->session);
-  if (status != MFX_ERR_NONE) {
-    LOG("Failed to init mfx session (%d)", status);
-    return NULL;
+  mfxStatus mfx_status =
+      MFXInit(MFX_IMPL_HARDWARE, NULL, &decode_context->mfx_session);
+  if (mfx_status != MFX_ERR_NONE) {
+    LOG("Failed to init mfx session (%s)", MfxStatusString(mfx_status));
+    goto rollback_display;
   }
-  status = MFXVideoCORE_SetHandle(
-      decode_context->session, MFX_HANDLE_VA_DISPLAY, decode_context->display);
-  if (status != MFX_ERR_NONE) {
-    LOG("Failed to set mfx session display (%d)", status);
-    return NULL;
+  mfx_status =
+      MFXVideoCORE_SetHandle(decode_context->mfx_session, MFX_HANDLE_VA_DISPLAY,
+                             decode_context->va_display);
+  if (mfx_status != MFX_ERR_NONE) {
+    LOG("Failed to set mfx session display (%s)", MfxStatusString(mfx_status));
+    goto rollback_session;
   }
-  status = MFXVideoCORE_SetFrameAllocator(decode_context->session,
-                                          &decode_context->allocator);
-  if (status != MFX_ERR_NONE) {
-    LOG("Failed to set frame allocator (%d)", status);
-    return NULL;
+  mfx_status = MFXVideoCORE_SetFrameAllocator(decode_context->mfx_session,
+                                              &decode_context->allocator);
+  if (mfx_status != MFX_ERR_NONE) {
+    LOG("Failed to set frame allocator (%s)", MfxStatusString(mfx_status));
+    goto rollback_session;
   }
+  return decode_context;
 
-  decode_context->recording_started = MicrosNow();
-  TimingStatsReset(&decode_context->receive);
-  TimingStatsReset(&decode_context->decode);
-  TimingStatsReset(&decode_context->total);
-  return RELEASE(decode_context);
+rollback_session:
+  MFXClose(decode_context->mfx_session);
+rollback_display:
+  vaTerminate(decode_context->va_display);
+rollback_drm_fd:
+  close(decode_context->drm_fd);
+rollback_decode_context:
+  free(decode_context);
+  return NULL;
 }
 
 static bool InitializeDecoder(struct DecodeContext* decode_context,
@@ -301,85 +358,38 @@ static bool InitializeDecoder(struct DecodeContext* decode_context,
   mfxVideoParam video_param = {
       .mfx.CodecId = MFX_CODEC_HEVC,
   };
-  mfxStatus status = MFXVideoDECODE_DecodeHeader(decode_context->session,
-                                                 bitstream, &video_param);
-  switch (status) {
+  mfxStatus mfx_status = MFXVideoDECODE_DecodeHeader(
+      decode_context->mfx_session, bitstream, &video_param);
+  switch (mfx_status) {
     case MFX_ERR_NONE:
       break;
     case MFX_ERR_MORE_DATA:
       return true;
     default:
-      LOG("Failed to parse decode header (%d)", status);
+      LOG("Failed to decode header (%s)", MfxStatusString(mfx_status));
       return false;
   }
 
   video_param.AsyncDepth = 1;
   video_param.mfx.DecodedOrder = 1;
   video_param.IOPattern = MFX_IOPATTERN_OUT_VIDEO_MEMORY;
-  status =
-      MFXVideoDECODE_Query(decode_context->session, &video_param, &video_param);
-  if (status != MFX_ERR_NONE) {
-    LOG("Failed to query decode (%d)", status);
+  mfx_status = MFXVideoDECODE_Query(decode_context->mfx_session, &video_param,
+                                    &video_param);
+  if (mfx_status != MFX_ERR_NONE) {
+    LOG("Failed to query decode (%s)", MfxStatusString(mfx_status));
     return false;
   }
 
-  status = MFXVideoDECODE_Init(decode_context->session, &video_param);
-  if (status != MFX_ERR_NONE) {
-    LOG("Failed to init decode (%d)", status);
+  mfx_status = MFXVideoDECODE_Init(decode_context->mfx_session, &video_param);
+  if (mfx_status != MFX_ERR_NONE) {
+    LOG("Failed to init decode (%s)", MfxStatusString(mfx_status));
     return false;
-  }
-  decode_context->initialized = true;
-  return true;
-}
-
-static bool ReadSomePacketData(struct DecodeContext* decode_context, int fd) {
-again:;
-  void* target;
-  size_t size;
-  if (!decode_context->packet_size) {
-    target = &decode_context->packet_size;
-    size = sizeof(decode_context->packet_size);
-    decode_context->frame_header_ts = MicrosNow();
-  } else {
-    target = decode_context->packet_data + decode_context->packet_offset;
-    size = decode_context->packet_size - decode_context->packet_offset;
-  }
-  ssize_t result = read(fd, target, size);
-  switch (result) {
-    case -1:
-      if (errno == EINTR) goto again;
-      LOG("Failed to read packet data (%s)", strerror(errno));
-      return false;
-    case 0:
-      LOG("File descriptor was closed");
-      return false;
-    default:
-      break;
-  }
-  if (target != &decode_context->packet_size) {
-    decode_context->packet_offset += result;
-    return true;
-  }
-  if (result != (ssize_t)size) {
-    LOG("Failed to read complete packet size");
-    return false;
-  }
-  if (decode_context->packet_size > decode_context->packet_alloc) {
-    uint32_t packet_alloc = decode_context->packet_size;
-    uint8_t* packet_data = malloc(packet_alloc);
-    if (!packet_data) {
-      LOG("Failed to reallocate packet data (%s)", strerror(errno));
-      return false;
-    }
-    free(decode_context->packet_data);
-    decode_context->packet_data = packet_data;
-    decode_context->packet_alloc = packet_alloc;
   }
   return true;
 }
 
 static struct Surface* GetFreeSurface(struct DecodeContext* decode_context) {
-  struct Surface** psurface = decode_context->sufaces;
+  struct Surface** psurface = decode_context->surfaces;
   for (; *psurface && (*psurface)->locked; psurface++)
     ;
   (*psurface)->locked = true;
@@ -389,9 +399,9 @@ static struct Surface* GetFreeSurface(struct DecodeContext* decode_context) {
 static size_t UnlockAllSurfaces(struct DecodeContext* decode_context,
                                 const struct Surface* keep_locked) {
   size_t result = 0;
-  for (size_t i = 0; decode_context->sufaces[i]; i++) {
-    if (decode_context->sufaces[i] != keep_locked) {
-      decode_context->sufaces[i]->locked = false;
+  for (size_t i = 0; decode_context->surfaces[i]; i++) {
+    if (decode_context->surfaces[i] != keep_locked) {
+      decode_context->surfaces[i]->locked = false;
     } else {
       result = i;
     }
@@ -399,84 +409,61 @@ static size_t UnlockAllSurfaces(struct DecodeContext* decode_context,
   return result;
 }
 
-static void HandleTimingStats(struct DecodeContext* decode_context) {
-  TimingStatsRecord(
-      &decode_context->receive,
-      decode_context->frame_received_ts - decode_context->frame_header_ts);
-  TimingStatsRecord(
-      &decode_context->decode,
-      decode_context->frame_decoded_ts - decode_context->frame_received_ts);
-  TimingStatsRecord(
-      &decode_context->total,
-      decode_context->frame_decoded_ts - decode_context->frame_header_ts);
-
-  unsigned long long period =
-      decode_context->frame_decoded_ts - decode_context->recording_started;
-  static const unsigned long long second = 1000000;
-  if (period < 10 * second) return;
-
-  LOG("---->8-------->8-------->8----");
-  TimingStatsLog(&decode_context->receive, "Receive",
-                 decode_context->frame_counter);
-  TimingStatsLog(&decode_context->decode, "Decode",
-                 decode_context->frame_counter);
-  TimingStatsLog(&decode_context->total, "Total",
-                 decode_context->frame_counter);
-  LOG("Framerate: %llu fps", decode_context->frame_counter * second / period);
-  LOG("Bitstream: %llu Kbps",
-      decode_context->bitstream * second * 8 / period / 1024);
-  decode_context->recording_started = decode_context->frame_decoded_ts;
-  TimingStatsReset(&decode_context->receive);
-  TimingStatsReset(&decode_context->decode);
-  TimingStatsReset(&decode_context->total);
-  decode_context->frame_counter = 0;
-  decode_context->bitstream = 0;
-}
-
 bool DecodeContextDecode(struct DecodeContext* decode_context, int fd) {
-  if (!ReadSomePacketData(decode_context, fd)) {
-    LOG("Failed to read some packet data");
-    return false;
+  switch (BufferAppendFrom(&decode_context->buffer, fd)) {
+    case -1:
+      LOG("Failed to append packet data to buffer (%s)", strerror(errno));
+      return false;
+    case 0:
+      LOG("Server closed connection");
+      return false;
+    default:
+      break;
   }
 
-  if (decode_context->packet_size != decode_context->packet_offset) {
-    // mburakov: Full frame has to be available for decoding.
+again:
+  if (decode_context->buffer.size < sizeof(uint32_t)) {
+    // mburakov: Packet size is not yet available.
     return true;
   }
+  uint32_t packet_size = *(uint32_t*)decode_context->buffer.data;
+  if (decode_context->buffer.size < sizeof(uint32_t) + packet_size) {
+    // mburakov: Full packet is not yet available.
+    return true;
+  }
+
   mfxBitstream bitstream = {
       .DecodeTimeStamp = MFX_TIMESTAMP_UNKNOWN,
       .TimeStamp = (mfxU64)MFX_TIMESTAMP_UNKNOWN,
-      .Data = decode_context->packet_data,
-      .DataLength = decode_context->packet_size,
-      .MaxLength = decode_context->packet_size,
+      .Data = (mfxU8*)decode_context->buffer.data + sizeof(uint32_t),
+      .DataLength = packet_size,
+      .MaxLength = packet_size,
       .DataFlag = MFX_BITSTREAM_COMPLETE_FRAME,
   };
-  decode_context->packet_size = 0;
-  decode_context->packet_offset = 0;
-  decode_context->frame_received_ts = MicrosNow();
-  decode_context->bitstream += bitstream.DataLength;
 
-  if (!decode_context->initialized) {
+  if (!decode_context->surfaces) {
     if (!InitializeDecoder(decode_context, &bitstream)) {
       LOG("Failed to initialize decoder");
       return false;
     }
-    // mburakov: Initialization might be postponed.
-    if (!decode_context->initialized) return true;
+    if (!decode_context->surfaces) {
+      // mburakov: Initialization might be postponed.
+      return true;
+    }
   }
 
   for (;;) {
     struct Surface* surface = GetFreeSurface(decode_context);
     mfxFrameSurface1 surface_work = {
-        .Info = surface->frame_info,
+        .Info = surface->mfx_frame_info,
         .Data.MemId = surface,
     };
     mfxFrameSurface1* surface_out = NULL;
     mfxSyncPoint sync = NULL;
-    mfxStatus status =
-        MFXVideoDECODE_DecodeFrameAsync(decode_context->session, &bitstream,
+    mfxStatus mfx_status =
+        MFXVideoDECODE_DecodeFrameAsync(decode_context->mfx_session, &bitstream,
                                         &surface_work, &surface_out, &sync);
-    switch (status) {
+    switch (mfx_status) {
       case MFX_ERR_MORE_SURFACE:
         continue;
       case MFX_ERR_NONE:
@@ -487,14 +474,14 @@ bool DecodeContextDecode(struct DecodeContext* decode_context, int fd) {
       case MFX_WRN_VIDEO_PARAM_CHANGED:
         continue;
       default:
-        LOG("Failed to decode frame (%d)", status);
+        LOG("Failed to decode frame (%s)", MfxStatusString(mfx_status));
         return false;
     }
 
-    status =
-        MFXVideoCORE_SyncOperation(decode_context->session, sync, MFX_INFINITE);
-    if (status != MFX_ERR_NONE) {
-      LOG("Failed to sync operation (%d)", status);
+    mfx_status = MFXVideoCORE_SyncOperation(decode_context->mfx_session, sync,
+                                            MFX_INFINITE);
+    if (mfx_status != MFX_ERR_NONE) {
+      LOG("Failed to sync operation (%s)", MfxStatusString(mfx_status));
       return false;
     }
 
@@ -504,19 +491,15 @@ bool DecodeContextDecode(struct DecodeContext* decode_context, int fd) {
       return false;
     }
 
-    decode_context->frame_decoded_ts = MicrosNow();
-    decode_context->frame_counter++;
-    HandleTimingStats(decode_context);
-    return true;
+    BufferDiscard(&decode_context->buffer, sizeof(uint32_t) + packet_size);
+    goto again;
   }
 }
 
-void DecodeContextDestroy(struct DecodeContext** decode_context) {
-  if (!decode_context || !*decode_context) return;
-  if ((*decode_context)->packet_data) free((*decode_context)->packet_data);
-  if ((*decode_context)->session) MFXClose((*decode_context)->session);
-  if ((*decode_context)->display) vaTerminate((*decode_context)->display);
-  if ((*decode_context)->drm_fd) close((*decode_context)->drm_fd);
-  free(*decode_context);
-  *decode_context = NULL;
+void DecodeContextDestroy(struct DecodeContext* decode_context) {
+  BufferDestroy(&decode_context->buffer);
+  MFXClose(decode_context->mfx_session);
+  vaTerminate(decode_context->va_display);
+  close(decode_context->drm_fd);
+  free(decode_context);
 }
