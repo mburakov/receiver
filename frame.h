@@ -32,12 +32,12 @@ struct Frame {
   uint32_t width;
   uint32_t height;
   uint32_t fourcc;
-  size_t nplanes;
+  uint32_t nplanes;
   struct FramePlane planes[4];
 };
 
 struct Frame* FrameCreate(uint32_t width, uint32_t height, uint32_t fourcc,
-                          size_t nplanes, const struct FramePlane* planes);
+                          uint32_t nplanes, const struct FramePlane* planes);
 void FrameDestroy(struct Frame** frame);
 
 #endif  // RECEIVER_FRAME_H_

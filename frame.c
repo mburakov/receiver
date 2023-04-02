@@ -26,7 +26,7 @@
 #include "util.h"
 
 struct Frame* FrameCreate(uint32_t width, uint32_t height, uint32_t fourcc,
-                          size_t nplanes, const struct FramePlane* planes) {
+                          uint32_t nplanes, const struct FramePlane* planes) {
   struct AUTO(Frame)* frame = malloc(sizeof(struct Frame));
   if (!frame) {
     LOG("Failed to allocate frame (%s)", strerror(errno));
@@ -37,10 +37,10 @@ struct Frame* FrameCreate(uint32_t width, uint32_t height, uint32_t fourcc,
       .height = height,
       .fourcc = fourcc,
       .nplanes = nplanes,
-      .planes[0] = {.dmabuf_fd = -1, .pitch = 0, .offset = 0, .modifier = 0},
-      .planes[1] = {.dmabuf_fd = -1, .pitch = 0, .offset = 0, .modifier = 0},
-      .planes[2] = {.dmabuf_fd = -1, .pitch = 0, .offset = 0, .modifier = 0},
-      .planes[3] = {.dmabuf_fd = -1, .pitch = 0, .offset = 0, .modifier = 0},
+      .planes[0] = {.dmabuf_fd = -1},
+      .planes[1] = {.dmabuf_fd = -1},
+      .planes[2] = {.dmabuf_fd = -1},
+      .planes[3] = {.dmabuf_fd = -1},
   };
 
   for (size_t i = 0; i < nplanes; i++) {
