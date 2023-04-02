@@ -197,11 +197,12 @@ static void OnWlKeyboardKeymap(void* data, struct wl_keyboard* wl_keyboard,
 static void OnWlKeyboardEnter(void* data, struct wl_keyboard* wl_keyboard,
                               uint32_t serial, struct wl_surface* surface,
                               struct wl_array* keys) {
-  (void)data;
   (void)wl_keyboard;
   (void)serial;
   (void)surface;
   (void)keys;
+  struct Window* window = data;
+  window->event_handlers->OnFocus(window->user, true);
 }
 
 static void OnWlKeyboardLeave(void* data, struct wl_keyboard* wl_keyboard,
@@ -210,6 +211,8 @@ static void OnWlKeyboardLeave(void* data, struct wl_keyboard* wl_keyboard,
   (void)wl_keyboard;
   (void)serial;
   (void)surface;
+  struct Window* window = data;
+  window->event_handlers->OnFocus(window->user, false);
 }
 
 static void OnWlKeyboardKey(void* data, struct wl_keyboard* wl_keyboard,

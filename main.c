@@ -29,6 +29,7 @@
 #include <unistd.h>
 
 #include "decode.h"
+#include "input.h"
 #include "toolbox/utils.h"
 #include "window.h"
 
@@ -82,8 +83,25 @@ static void OnWindowClose(void* user) {
   g_signal = SIGINT;
 }
 
+static void OnWindowFocus(void* user, bool focused) {
+  if (focused) return;
+  if (!InputStreamHandsoff(user)) {
+    LOG("Failed to handle window focus");
+    g_signal = SIGABRT;
+  }
+}
+
 static void OnWindowKey(void* user, unsigned key, bool pressed) {
-  // TODO
+  if (!InputStreamKeyPress(user, key, pressed)) {
+    LOG("Failed to handle key press");
+    g_signal = SIGABRT;
+  }
+}
+
+static void InputStreamDtor(struct InputStream** input_stream) {
+  if (!*input_stream) return;
+  InputStreamDestroy(*input_stream);
+  *input_stream = NULL;
 }
 
 static void WindowDtor(struct Window** window) {
@@ -99,19 +117,31 @@ static void DecodeContextDtor(struct DecodeContext** decode_context) {
 }
 
 int main(int argc, char* argv[]) {
-  if (argc < 2) {
-    LOG("Usage: %s <ip>:<port>", argv[0]);
+  if (argc < 3) {
+    LOG("Usage: %s <ip>:<port> <ip>:<port>", argv[0]);
     return EXIT_FAILURE;
   }
   int __attribute__((cleanup(SocketDtor))) sock = ConnectSocket(argv[1]);
   if (sock == -1) return EXIT_FAILURE;
 
+  // TODO(mburakov): Use sock instead of sock2 once backend is ready.
+  int __attribute__((cleanup(SocketDtor))) sock2 = ConnectSocket(argv[2]);
+  if (sock2 == -1) return EXIT_FAILURE;
+
+  struct InputStream __attribute__((cleanup(InputStreamDtor)))* input_stream =
+      InputStreamCreate(sock2);
+  if (!input_stream) {
+    LOG("Failed to create input stream");
+    return EXIT_FAILURE;
+  }
+
   static const struct WindowEventHandlers window_event_handlers = {
       .OnClose = OnWindowClose,
+      .OnFocus = OnWindowFocus,
       .OnKey = OnWindowKey,
   };
   struct Window __attribute__((cleanup(WindowDtor)))* window =
-      WindowCreate(&window_event_handlers, NULL);
+      WindowCreate(&window_event_handlers, input_stream);
   if (!window) {
     LOG("Failed to create window");
     return EXIT_FAILURE;

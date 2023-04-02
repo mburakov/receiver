@@ -15,28 +15,17 @@
  * along with receiver.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#ifndef RECEIVER_WINDOW_H_
-#define RECEIVER_WINDOW_H_
+#ifndef RECEIVER_INPUT_H_
+#define RECEIVER_INPUT_H_
 
 #include <stdbool.h>
-#include <stddef.h>
 
-struct Window;
-struct Frame;
+struct InputStream;
 
-struct WindowEventHandlers {
-  void (*OnClose)(void* user);
-  void (*OnFocus)(void* user, bool focused);
-  void (*OnKey)(void* user, unsigned key, bool pressed);
-};
+struct InputStream* InputStreamCreate(int fd);
+bool InputStreamKeyPress(struct InputStream* input_stream, unsigned evdev_code,
+                         bool pressed);
+bool InputStreamHandsoff(struct InputStream* input_stream);
+void InputStreamDestroy(struct InputStream* input_stream);
 
-struct Window* WindowCreate(
-    const struct WindowEventHandlers* window_event_handlers, void* user);
-int WindowGetEventsFd(const struct Window* window);
-bool WindowProcessEvents(const struct Window* window);
-bool WindowAssignFrames(struct Window* window, size_t nframes,
-                        const struct Frame* frames);
-bool WindowShowFrame(struct Window* window, size_t index);
-void WindowDestroy(struct Window* window);
-
-#endif  // RECEIVER_WINDOW_H_
+#endif  // RECEIVER_INPUT_H_
