@@ -2,4 +2,6 @@
 .clang-format
 compile_commands.json
 compile_flags.txt
+linux-dmabuf-unstable-v1.h
 receiver
+xdg-shell.h

@@ -31,11 +31,31 @@
 static volatile sig_atomic_t g_signal;
 static void OnSignal(int status) { g_signal = status; }
 
+static void OnWindowClose(void* user) {
+  (void)user;
+  g_signal = SIGINT;
+}
+
+static void OnWindowKey(void* user, unsigned key, bool pressed) {
+  // TODO
+}
+
+static void WindowDtor(struct Window** window) {
+  if (!*window) return;
+  WindowDestroy(*window);
+  *window = NULL;
+}
+
 int main(int argc, char* argv[]) {
   (void)argc;
   (void)argv;
 
-  struct AUTO(Window)* window = WindowCreate();
+  static const struct WindowEventHandlers window_event_handlers = {
+      .OnClose = OnWindowClose,
+      .OnKey = OnWindowKey,
+  };
+  struct Window __attribute__((cleanup(WindowDtor)))* window =
+      WindowCreate(&window_event_handlers, NULL);
   if (!window) {
     LOG("Failed to create window");
     return EXIT_FAILURE;

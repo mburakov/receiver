@@ -24,12 +24,18 @@
 struct Window;
 struct Frame;
 
-struct Window* WindowCreate(void);
+struct WindowEventHandlers {
+  void (*OnClose)(void* user);
+  void (*OnKey)(void* user, unsigned key, bool pressed);
+};
+
+struct Window* WindowCreate(
+    const struct WindowEventHandlers* window_event_handlers, void* user);
 int WindowGetEventsFd(const struct Window* window);
 bool WindowProcessEvents(const struct Window* window);
 bool WindowAssignFrames(struct Window* window, size_t nframes,
                         const struct Frame* frames);
 bool WindowShowFrame(struct Window* window, size_t index);
-void WindowDestroy(struct Window** window);
+void WindowDestroy(struct Window* window);
 
 #endif  // RECEIVER_WINDOW_H_
