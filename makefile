@@ -16,6 +16,7 @@ protocols_dir:=\
 
 protocols:=\
 	linux-dmabuf-unstable-v1 \
+	pointer-constraints-unstable-v1 \
 	relative-pointer-unstable-v1 \
 	xdg-shell
 

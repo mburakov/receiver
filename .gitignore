@@ -3,6 +3,7 @@
 compile_commands.json
 compile_flags.txt
 linux-dmabuf-unstable-v1.h
+pointer-constraints-unstable-v1.h
 receiver
 relative-pointer-unstable-v1.h
 xdg-shell.h

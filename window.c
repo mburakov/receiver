@@ -26,6 +26,7 @@
 
 #include "frame.h"
 #include "linux-dmabuf-unstable-v1.h"
+#include "pointer-constraints-unstable-v1.h"
 #include "relative-pointer-unstable-v1.h"
 #include "toolbox/utils.h"
 #include "xdg-shell.h"
@@ -43,9 +44,11 @@ struct Window {
   struct wl_keyboard* wl_keyboard;
   struct xdg_wm_base* xdg_wm_base;
   struct zwp_linux_dmabuf_v1* zwp_linux_dmabuf_v1;
+  struct zwp_pointer_constraints_v1* zwp_pointer_constraints_v1;
   struct zwp_relative_pointer_manager_v1* zwp_relative_pointer_manager_v1;
 
   struct zwp_relative_pointer_v1* zwp_relative_pointer_v1;
+  struct zwp_locked_pointer_v1* zwp_locked_pointer_v1;
   struct xdg_surface* xdg_surface;
   struct xdg_toplevel* xdg_toplevel;
   struct wl_buffer** wl_buffers;
@@ -94,6 +97,12 @@ static void OnWlRegistryGlobal(void* data, struct wl_registry* wl_registry,
     if (!window->zwp_linux_dmabuf_v1)
       LOG("Failed to bind zwp_linux_dmabuf_v1 (%s)", strerror(errno));
 
+  } else if (!strcmp(interface, zwp_pointer_constraints_v1_interface.name)) {
+    window->zwp_pointer_constraints_v1 = wl_registry_bind(
+        wl_registry, name, &zwp_pointer_constraints_v1_interface, version);
+    if (!window->zwp_pointer_constraints_v1)
+      LOG("Failed to bind zwp_pointer_constraints_v1 (%s)", strerror(errno));
+
   } else if (!strcmp(interface,
                      zwp_relative_pointer_manager_v1_interface.name)) {
     window->zwp_relative_pointer_manager_v1 = wl_registry_bind(
@@ -116,11 +125,10 @@ static void OnWlPointerEnter(void* data, struct wl_pointer* wl_pointer,
                              uint32_t serial, struct wl_surface* surface,
                              wl_fixed_t surface_x, wl_fixed_t surface_y) {
   (void)data;
-  (void)wl_pointer;
-  (void)serial;
   (void)surface;
   (void)surface_x;
   (void)surface_y;
+  wl_pointer_set_cursor(wl_pointer, serial, NULL, 0, 0);
 }
 
 static void OnWlPointerLeave(void* data, struct wl_pointer* wl_pointer,
@@ -402,12 +410,20 @@ struct Window* WindowCreate(const struct WindowEventHandlers* event_handlers,
     goto rollback_globals;
   }
 
+  window->zwp_locked_pointer_v1 = zwp_pointer_constraints_v1_lock_pointer(
+      window->zwp_pointer_constraints_v1, window->wl_surface,
+      window->wl_pointer, NULL, ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT);
+  if (!window->zwp_locked_pointer_v1) {
+    LOG("Failed to lock wl_pointer (%s)", strerror(errno));
+    goto rollback_globals;
+  }
+
   window->zwp_relative_pointer_v1 =
       zwp_relative_pointer_manager_v1_get_relative_pointer(
           window->zwp_relative_pointer_manager_v1, window->wl_pointer);
   if (!window->zwp_relative_pointer_v1) {
     LOG("Failed to get zwp_relative_pointer_v1 (%s)", strerror(errno));
-    goto rollback_globals;
+    goto rollback_zwp_locked_pointer_v1;
   }
   static const struct zwp_relative_pointer_v1_listener
       zwp_relative_pointer_v1_listener = {
@@ -457,6 +473,7 @@ struct Window* WindowCreate(const struct WindowEventHandlers* event_handlers,
     LOG("Failed to roundtrip wl_display (%s)", strerror(errno));
     goto rollback_xdg_toplevel;
   }
+  zwp_locked_pointer_v1_set_region(window->zwp_locked_pointer_v1, NULL);
   wl_registry_destroy(wl_registry);
   return window;
 
@@ -466,6 +483,8 @@ rollback_xdg_surface:
   xdg_surface_destroy(window->xdg_surface);
 rollback_zwp_relative_pointer_v1:
   zwp_relative_pointer_v1_destroy(window->zwp_relative_pointer_v1);
+rollback_zwp_locked_pointer_v1:
+  zwp_locked_pointer_v1_destroy(window->zwp_locked_pointer_v1);
 rollback_globals:
   if (window->zwp_relative_pointer_manager_v1) {
     zwp_relative_pointer_manager_v1_destroy(
