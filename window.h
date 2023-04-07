@@ -28,6 +28,9 @@ struct WindowEventHandlers {
   void (*OnClose)(void* user);
   void (*OnFocus)(void* user, bool focused);
   void (*OnKey)(void* user, unsigned key, bool pressed);
+  void (*OnMove)(void* user, int dx, int dy);
+  void (*OnButton)(void* user, unsigned button, bool pressed);
+  void (*OnWheel)(void* user, int delta);
 };
 
 struct Window* WindowCreate(

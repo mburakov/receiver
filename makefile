@@ -16,6 +16,7 @@ protocols_dir:=\
 
 protocols:=\
 	linux-dmabuf-unstable-v1 \
+	relative-pointer-unstable-v1 \
 	xdg-shell
 
 obj:=$(patsubst %,%.o,$(protocols)) $(obj)

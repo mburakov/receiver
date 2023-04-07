@@ -26,6 +26,7 @@
 
 #include "frame.h"
 #include "linux-dmabuf-unstable-v1.h"
+#include "relative-pointer-unstable-v1.h"
 #include "toolbox/utils.h"
 #include "xdg-shell.h"
 
@@ -42,7 +43,9 @@ struct Window {
   struct wl_keyboard* wl_keyboard;
   struct xdg_wm_base* xdg_wm_base;
   struct zwp_linux_dmabuf_v1* zwp_linux_dmabuf_v1;
+  struct zwp_relative_pointer_manager_v1* zwp_relative_pointer_manager_v1;
 
+  struct zwp_relative_pointer_v1* zwp_relative_pointer_v1;
   struct xdg_surface* xdg_surface;
   struct xdg_toplevel* xdg_toplevel;
   struct wl_buffer** wl_buffers;
@@ -90,6 +93,15 @@ static void OnWlRegistryGlobal(void* data, struct wl_registry* wl_registry,
         wl_registry, name, &zwp_linux_dmabuf_v1_interface, version);
     if (!window->zwp_linux_dmabuf_v1)
       LOG("Failed to bind zwp_linux_dmabuf_v1 (%s)", strerror(errno));
+
+  } else if (!strcmp(interface,
+                     zwp_relative_pointer_manager_v1_interface.name)) {
+    window->zwp_relative_pointer_manager_v1 = wl_registry_bind(
+        wl_registry, name, &zwp_relative_pointer_manager_v1_interface, version);
+    if (!window->zwp_relative_pointer_manager_v1) {
+      LOG("Failed to bind zwp_relative_pointer_manager_v1 (%s)",
+          strerror(errno));
+    }
   }
 }
 
@@ -132,12 +144,11 @@ static void OnWlPointerMotion(void* data, struct wl_pointer* wl_pointer,
 static void OnWlPointerButton(void* data, struct wl_pointer* wl_pointer,
                               uint32_t serial, uint32_t time, uint32_t button,
                               uint32_t state) {
-  (void)data;
   (void)wl_pointer;
   (void)serial;
   (void)time;
-  (void)button;
-  (void)state;
+  struct Window* window = data;
+  window->event_handlers->OnButton(window->user, button, !!state);
 }
 
 static void OnWlPointerAxis(void* data, struct wl_pointer* wl_pointer,
@@ -179,10 +190,14 @@ static void OnWlPointerAxisDiscrete(void* data, struct wl_pointer* wl_pointer,
 
 static void OnWlPointerAxisValue120(void* data, struct wl_pointer* wl_pointer,
                                     uint32_t axis, int32_t value120) {
-  (void)data;
   (void)wl_pointer;
-  (void)axis;
-  (void)value120;
+  if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL) {
+    // mburakov: Current code models regular one-wheeled mouse.
+    return;
+  }
+  struct Window* window = data;
+  // TODO(mburakov): Why minus is needed here?
+  window->event_handlers->OnWheel(window->user, -value120 / 120);
 }
 
 static void OnWlKeyboardKeymap(void* data, struct wl_keyboard* wl_keyboard,
@@ -252,6 +267,20 @@ static void OnXdgWmBasePing(void* data, struct xdg_wm_base* xdg_wm_base,
   xdg_wm_base_pong(xdg_wm_base, serial);
 }
 
+static void OnZwpRelativePointerMotion(
+    void* data, struct zwp_relative_pointer_v1* zwp_relative_pointer_v1,
+    uint32_t utime_hi, uint32_t utime_lo, wl_fixed_t dx, wl_fixed_t dy,
+    wl_fixed_t dx_unaccel, wl_fixed_t dy_unaccel) {
+  (void)zwp_relative_pointer_v1;
+  (void)utime_hi;
+  (void)utime_lo;
+  (void)dx;
+  (void)dy;
+  struct Window* window = data;
+  window->event_handlers->OnMove(window->user, wl_fixed_to_int(dx_unaccel),
+                                 wl_fixed_to_int(dy_unaccel));
+}
+
 static void OnXdgSurfaceConfigure(void* data, struct xdg_surface* xdg_surface,
                                   uint32_t serial) {
   (void)data;
@@ -291,6 +320,7 @@ static void OnXdgToplevelWmCapabilities(void* data,
   (void)xdg_toplevel;
   (void)capabilities;
 }
+
 struct Window* WindowCreate(const struct WindowEventHandlers* event_handlers,
                             void* user) {
   struct Window* window = malloc(sizeof(struct Window));
@@ -327,7 +357,8 @@ struct Window* WindowCreate(const struct WindowEventHandlers* event_handlers,
     goto rollback_wl_registry;
   }
   if (!window->wl_surface || !window->wl_pointer || !window->wl_keyboard ||
-      !window->xdg_wm_base || !window->zwp_linux_dmabuf_v1) {
+      !window->xdg_wm_base || !window->zwp_linux_dmabuf_v1 ||
+      !window->zwp_relative_pointer_manager_v1) {
     LOG("Some wayland objects are missing");
     goto rollback_globals;
   }
@@ -371,11 +402,29 @@ struct Window* WindowCreate(const struct WindowEventHandlers* event_handlers,
     goto rollback_globals;
   }
 
+  window->zwp_relative_pointer_v1 =
+      zwp_relative_pointer_manager_v1_get_relative_pointer(
+          window->zwp_relative_pointer_manager_v1, window->wl_pointer);
+  if (!window->zwp_relative_pointer_v1) {
+    LOG("Failed to get zwp_relative_pointer_v1 (%s)", strerror(errno));
+    goto rollback_globals;
+  }
+  static const struct zwp_relative_pointer_v1_listener
+      zwp_relative_pointer_v1_listener = {
+          .relative_motion = OnZwpRelativePointerMotion,
+      };
+  if (zwp_relative_pointer_v1_add_listener(window->zwp_relative_pointer_v1,
+                                           &zwp_relative_pointer_v1_listener,
+                                           window)) {
+    LOG("Failed to add zwp_relative_pointer_v1 listener (%s)", strerror(errno));
+    goto rollback_zwp_relative_pointer_v1;
+  }
+
   window->xdg_surface =
       xdg_wm_base_get_xdg_surface(window->xdg_wm_base, window->wl_surface);
   if (!window->xdg_surface) {
     LOG("Failed to get xdg_surface (%s)", strerror(errno));
-    goto rollback_globals;
+    goto rollback_zwp_relative_pointer_v1;
   }
   static const struct xdg_surface_listener xdg_surface_listener = {
       .configure = OnXdgSurfaceConfigure,
@@ -415,7 +464,13 @@ rollback_xdg_toplevel:
   xdg_toplevel_destroy(window->xdg_toplevel);
 rollback_xdg_surface:
   xdg_surface_destroy(window->xdg_surface);
+rollback_zwp_relative_pointer_v1:
+  zwp_relative_pointer_v1_destroy(window->zwp_relative_pointer_v1);
 rollback_globals:
+  if (window->zwp_relative_pointer_manager_v1) {
+    zwp_relative_pointer_manager_v1_destroy(
+        window->zwp_relative_pointer_manager_v1);
+  }
   if (window->zwp_linux_dmabuf_v1)
     zwp_linux_dmabuf_v1_destroy(window->zwp_linux_dmabuf_v1);
   if (window->xdg_wm_base) xdg_wm_base_destroy(window->xdg_wm_base);
@@ -506,6 +561,8 @@ void WindowDestroy(struct Window* window) {
   DestroyBuffers(window);
   xdg_toplevel_destroy(window->xdg_toplevel);
   xdg_surface_destroy(window->xdg_surface);
+  zwp_relative_pointer_manager_v1_destroy(
+      window->zwp_relative_pointer_manager_v1);
   zwp_linux_dmabuf_v1_destroy(window->zwp_linux_dmabuf_v1);
   xdg_wm_base_destroy(window->xdg_wm_base);
   wl_keyboard_release(window->wl_keyboard);

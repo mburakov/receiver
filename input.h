@@ -25,6 +25,10 @@ struct InputStream;
 struct InputStream* InputStreamCreate(int fd);
 bool InputStreamKeyPress(struct InputStream* input_stream, unsigned evdev_code,
                          bool pressed);
+bool InputStreamMouseMove(struct InputStream* input_stream, int dx, int dy);
+bool InputStreamMouseButton(struct InputStream* input_stream, unsigned button,
+                            bool pressed);
+bool InputStreamMouseWheel(struct InputStream* input_stream, int delta);
 bool InputStreamHandsoff(struct InputStream* input_stream);
 void InputStreamDestroy(struct InputStream* input_stream);
 

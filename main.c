@@ -98,6 +98,27 @@ static void OnWindowKey(void* user, unsigned key, bool pressed) {
   }
 }
 
+static void OnWindowMove(void* user, int dx, int dy) {
+  if (!InputStreamMouseMove(user, dx, dy)) {
+    LOG("Failed to handle mouse move");
+    g_signal = SIGABRT;
+  }
+}
+
+static void OnWindowButton(void* user, unsigned button, bool pressed) {
+  if (!InputStreamMouseButton(user, button, pressed)) {
+    LOG("Failed to handle mouse button");
+    g_signal = SIGABRT;
+  }
+}
+
+static void OnWindowWheel(void* user, int delta) {
+  if (!InputStreamMouseWheel(user, delta)) {
+    LOG("Failed to handle mouse wheel");
+    g_signal = SIGABRT;
+  }
+}
+
 static void InputStreamDtor(struct InputStream** input_stream) {
   if (!*input_stream) return;
   InputStreamDestroy(*input_stream);
@@ -139,6 +160,9 @@ int main(int argc, char* argv[]) {
       .OnClose = OnWindowClose,
       .OnFocus = OnWindowFocus,
       .OnKey = OnWindowKey,
+      .OnMove = OnWindowMove,
+      .OnButton = OnWindowButton,
+      .OnWheel = OnWindowWheel,
   };
   struct Window __attribute__((cleanup(WindowDtor)))* window =
       WindowCreate(&window_event_handlers, input_stream);

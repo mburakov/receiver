@@ -18,6 +18,7 @@
 #include "input.h"
 
 #include <errno.h>
+#include <linux/input-event-codes.h>
 #include <linux/uhid.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -87,6 +88,7 @@ static const struct uhid_event uhid_event_create2 = {
 
 struct InputStream {
   int fd;
+  unsigned button_state;
   uint64_t key_state[4];
 };
 
@@ -172,7 +174,7 @@ bool InputStreamKeyPress(struct InputStream* input_stream, unsigned evdev_code,
   uint64_t key_state_shift = evdev_code & 0x3f;
   uint64_t key_state =
       (input_stream->key_state[key_state_row] & ~(1ull << key_state_shift)) |
-      ((uint64_t)(!!pressed) << key_state_shift);
+      (((uint64_t) !!pressed) << key_state_shift);
   if (key_state == input_stream->key_state[key_state_row]) return true;
   input_stream->key_state[key_state_row] = key_state;
 
@@ -180,6 +182,70 @@ bool InputStreamKeyPress(struct InputStream* input_stream, unsigned evdev_code,
   size_t size = InputStreamFormatKeyboard(input_stream, &uhid_event_input2);
   bool result = Drain(input_stream->fd, &uhid_event_input2, size);
   if (!result) LOG("Failed to drain keypress");
+  return result;
+}
+
+static size_t InputStreamFormatMouse(const struct InputStream* input_stream,
+                                     struct uhid_event* uhid_event, int dx,
+                                     int dy, int wheel) {
+  uhid_event->type = UHID_INPUT2;
+  uhid_event->u.input2.data[0] = 2;
+  uhid_event->u.input2.data[1] = input_stream->button_state & 0xff;
+  uhid_event->u.input2.data[2] = dx & 0xff;
+  uhid_event->u.input2.data[3] = dx >> 8 & 0xff;
+  uhid_event->u.input2.data[4] = dy & 0xff;
+  uhid_event->u.input2.data[5] = dy >> 8 & 0xff;
+  uhid_event->u.input2.data[6] = wheel & 0xff;
+  uhid_event->u.input2.size = 7;
+  return offsetof(struct uhid_event, u.input2.data) + uhid_event->u.input2.size;
+}
+
+bool InputStreamMouseMove(struct InputStream* input_stream, int dx, int dy) {
+  struct uhid_event uhid_event_input2;
+  size_t size =
+      InputStreamFormatMouse(input_stream, &uhid_event_input2, dx, dy, 0);
+  bool result = Drain(input_stream->fd, &uhid_event_input2, size);
+  if (!result) LOG("Failed to drain mousemove");
+  return result;
+}
+
+bool InputStreamMouseButton(struct InputStream* input_stream, unsigned button,
+                            bool pressed) {
+  unsigned button_shift;
+  switch (button) {
+    case BTN_LEFT:
+      button_shift = 0;
+      break;
+    case BTN_RIGHT:
+      button_shift = 1;
+      break;
+    case BTN_MIDDLE:
+      button_shift = 2;
+      break;
+    default:
+      // mburakov: Ignore unknown buttons...
+      return true;
+  }
+
+  unsigned button_state = (input_stream->button_state & ~(1u << button_shift)) |
+                          (((unsigned)!!pressed) << button_shift);
+  if (button_state == input_stream->button_state) return true;
+  input_stream->button_state = button_state;
+
+  struct uhid_event uhid_event_input2;
+  size_t size =
+      InputStreamFormatMouse(input_stream, &uhid_event_input2, 0, 0, 0);
+  bool result = Drain(input_stream->fd, &uhid_event_input2, size);
+  if (!result) LOG("Failed to drain mousebutton");
+  return result;
+}
+
+bool InputStreamMouseWheel(struct InputStream* input_stream, int delta) {
+  struct uhid_event uhid_event_input2;
+  size_t size =
+      InputStreamFormatMouse(input_stream, &uhid_event_input2, 0, 0, delta);
+  bool result = Drain(input_stream->fd, &uhid_event_input2, size);
+  if (!result) LOG("Failed to drain mousewheel");
   return result;
 }
 
