@@ -251,11 +251,13 @@ bool InputStreamMouseWheel(struct InputStream* input_stream, int delta) {
 
 bool InputStreamHandsoff(struct InputStream* input_stream) {
   memset(input_stream->key_state, 0, sizeof(input_stream->key_state));
-  static const struct uhid_event uhid_event_input2 = {
-      .type = UHID_INPUT2,
+  memset(&input_stream->button_state, 0, sizeof(input_stream->button_state));
+  static const uint8_t uhid_event_input2[] = {
+      UHID_INPUT2, 0x00, 0x00, 0x00, 0x08, 0x00, 1, 0, 0, 0, 0, 0, 0, 0,
+      UHID_INPUT2, 0x00, 0x00, 0x00, 0x07, 0x00, 2, 0, 0, 0, 0, 0, 0,
   };
-  bool result = Drain(input_stream->fd, &uhid_event_input2,
-                      sizeof(uhid_event_input2.type));
+  bool result =
+      Drain(input_stream->fd, uhid_event_input2, sizeof(uhid_event_input2));
   if (!result) LOG("Failed to drain handsoff");
   return result;
 }

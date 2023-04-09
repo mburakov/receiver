@@ -137,19 +137,15 @@ static void DecodeContextDtor(struct DecodeContext** decode_context) {
 }
 
 int main(int argc, char* argv[]) {
-  if (argc < 3) {
-    LOG("Usage: %s <ip>:<port> <ip>:<port>", argv[0]);
+  if (argc < 2) {
+    LOG("Usage: %s <ip>:<port>", argv[0]);
     return EXIT_FAILURE;
   }
   int __attribute__((cleanup(SocketDtor))) sock = ConnectSocket(argv[1]);
   if (sock == -1) return EXIT_FAILURE;
 
-  // TODO(mburakov): Use sock instead of sock2 once backend is ready.
-  int __attribute__((cleanup(SocketDtor))) sock2 = ConnectSocket(argv[2]);
-  if (sock2 == -1) return EXIT_FAILURE;
-
   struct InputStream __attribute__((cleanup(InputStreamDtor)))* input_stream =
-      InputStreamCreate(sock2);
+      InputStreamCreate(sock);
   if (!input_stream) {
     LOG("Failed to create input stream");
     return EXIT_FAILURE;
