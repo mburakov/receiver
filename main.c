@@ -55,8 +55,7 @@ static int ConnectSocket(const char* arg) {
     LOG("Failed to create socket (%s)", strerror(errno));
     return -1;
   }
-  static const int one = 1;
-  if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one))) {
+  if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &(int){1}, sizeof(int))) {
     LOG("Failed to set TCP_NODELAY (%s)", strerror(errno));
     goto rollback_sock;
   }
