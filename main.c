@@ -138,29 +138,40 @@ static void DecodeContextDtor(struct DecodeContext** decode_context) {
 
 int main(int argc, char* argv[]) {
   if (argc < 2) {
-    LOG("Usage: %s <ip>:<port>", argv[0]);
+    LOG("Usage: %s <ip>:<port> [--no-input]", argv[0]);
     return EXIT_FAILURE;
   }
   int __attribute__((cleanup(SocketDtor))) sock = ConnectSocket(argv[1]);
   if (sock == -1) return EXIT_FAILURE;
 
-  struct InputStream __attribute__((cleanup(InputStreamDtor)))* input_stream =
-      InputStreamCreate(sock);
-  if (!input_stream) {
-    LOG("Failed to create input stream");
-    return EXIT_FAILURE;
+  bool no_input = false;
+  for (int i = 2; i < argc; i++) {
+    if (!strcmp(argv[i], "--no-input")) {
+      no_input = true;
+      break;
+    }
   }
-
-  static const struct WindowEventHandlers window_event_handlers = {
-      .OnClose = OnWindowClose,
-      .OnFocus = OnWindowFocus,
-      .OnKey = OnWindowKey,
-      .OnMove = OnWindowMove,
-      .OnButton = OnWindowButton,
-      .OnWheel = OnWindowWheel,
-  };
+  struct InputStream
+      __attribute__((cleanup(InputStreamDtor)))* maybe_input_stream = NULL;
+  const struct WindowEventHandlers* maybe_window_event_handlers = NULL;
+  if (!no_input) {
+    maybe_input_stream = InputStreamCreate(sock);
+    if (!maybe_input_stream) {
+      LOG("Failed to create input stream");
+      return EXIT_FAILURE;
+    }
+    static const struct WindowEventHandlers window_event_handlers = {
+        .OnClose = OnWindowClose,
+        .OnFocus = OnWindowFocus,
+        .OnKey = OnWindowKey,
+        .OnMove = OnWindowMove,
+        .OnButton = OnWindowButton,
+        .OnWheel = OnWindowWheel,
+    };
+    maybe_window_event_handlers = &window_event_handlers;
+  }
   struct Window __attribute__((cleanup(WindowDtor)))* window =
-      WindowCreate(&window_event_handlers, input_stream);
+      WindowCreate(maybe_window_event_handlers, maybe_input_stream);
   if (!window) {
     LOG("Failed to create window");
     return EXIT_FAILURE;

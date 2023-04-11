@@ -52,6 +52,7 @@ struct Window {
   struct xdg_surface* xdg_surface;
   struct xdg_toplevel* xdg_toplevel;
   struct wl_buffer** wl_buffers;
+  bool was_closed;
 };
 
 static void OnWlRegistryGlobal(void* data, struct wl_registry* wl_registry,
@@ -70,7 +71,8 @@ static void OnWlRegistryGlobal(void* data, struct wl_registry* wl_registry,
       LOG("Failed to create wl_surface (%s)", strerror(errno));
     wl_compositor_destroy(compositor);
 
-  } else if (!strcmp(interface, wl_seat_interface.name)) {
+  } else if (!strcmp(interface, wl_seat_interface.name) &&
+             window->event_handlers) {
     struct wl_seat* wl_seat =
         wl_registry_bind(wl_registry, name, &wl_seat_interface, version);
     if (!wl_seat) {
@@ -97,14 +99,16 @@ static void OnWlRegistryGlobal(void* data, struct wl_registry* wl_registry,
     if (!window->zwp_linux_dmabuf_v1)
       LOG("Failed to bind zwp_linux_dmabuf_v1 (%s)", strerror(errno));
 
-  } else if (!strcmp(interface, zwp_pointer_constraints_v1_interface.name)) {
+  } else if (!strcmp(interface, zwp_pointer_constraints_v1_interface.name) &&
+             window->event_handlers) {
     window->zwp_pointer_constraints_v1 = wl_registry_bind(
         wl_registry, name, &zwp_pointer_constraints_v1_interface, version);
     if (!window->zwp_pointer_constraints_v1)
       LOG("Failed to bind zwp_pointer_constraints_v1 (%s)", strerror(errno));
 
   } else if (!strcmp(interface,
-                     zwp_relative_pointer_manager_v1_interface.name)) {
+                     zwp_relative_pointer_manager_v1_interface.name) &&
+             window->event_handlers) {
     window->zwp_relative_pointer_manager_v1 = wl_registry_bind(
         wl_registry, name, &zwp_relative_pointer_manager_v1_interface, version);
     if (!window->zwp_relative_pointer_manager_v1) {
@@ -309,7 +313,11 @@ static void OnXdgToplevelConfigure(void* data,
 static void OnXdgToplevelClose(void* data, struct xdg_toplevel* xdg_toplevel) {
   (void)xdg_toplevel;
   struct Window* window = data;
-  window->event_handlers->OnClose(window->user);
+  if (window->event_handlers) {
+    window->event_handlers->OnClose(window->user);
+  } else {
+    window->was_closed = true;
+  }
 }
 
 static void OnXdgToplevelConfigureBounds(void* data,
@@ -364,42 +372,51 @@ struct Window* WindowCreate(const struct WindowEventHandlers* event_handlers,
     LOG("Failed to roundtrip wl_display (%s)", strerror(errno));
     goto rollback_wl_registry;
   }
-  if (!window->wl_surface || !window->wl_pointer || !window->wl_keyboard ||
-      !window->xdg_wm_base || !window->zwp_linux_dmabuf_v1 ||
-      !window->zwp_relative_pointer_manager_v1) {
-    LOG("Some wayland objects are missing");
+  if (!window->wl_surface || !window->xdg_wm_base ||
+      !window->zwp_linux_dmabuf_v1) {
+    LOG("Some fundamental wayland objects are missing");
+    goto rollback_globals;
+  }
+  if (window->event_handlers && (!window->wl_pointer || !window->wl_keyboard ||
+                                 !window->zwp_pointer_constraints_v1 ||
+                                 !window->zwp_relative_pointer_manager_v1)) {
+    LOG("Some input-related wayland objects are missing");
     goto rollback_globals;
   }
 
-  static const struct wl_pointer_listener wl_pointer_listener = {
-      .enter = OnWlPointerEnter,
-      .leave = OnWlPointerLeave,
-      .motion = OnWlPointerMotion,
-      .button = OnWlPointerButton,
-      .axis = OnWlPointerAxis,
-      .frame = OnWlPointerFrame,
-      .axis_source = OnWlPointerAxisSource,
-      .axis_stop = OnWlPointerAxisStop,
-      .axis_discrete = OnWlPointerAxisDiscrete,
-      .axis_value120 = OnWlPointerAxisValue120,
-  };
-  if (wl_pointer_add_listener(window->wl_pointer, &wl_pointer_listener,
-                              window)) {
-    LOG("Failed to add wl_pointer listener (%s)", strerror(errno));
-    goto rollback_globals;
+  if (window->wl_pointer) {
+    static const struct wl_pointer_listener wl_pointer_listener = {
+        .enter = OnWlPointerEnter,
+        .leave = OnWlPointerLeave,
+        .motion = OnWlPointerMotion,
+        .button = OnWlPointerButton,
+        .axis = OnWlPointerAxis,
+        .frame = OnWlPointerFrame,
+        .axis_source = OnWlPointerAxisSource,
+        .axis_stop = OnWlPointerAxisStop,
+        .axis_discrete = OnWlPointerAxisDiscrete,
+        .axis_value120 = OnWlPointerAxisValue120,
+    };
+    if (wl_pointer_add_listener(window->wl_pointer, &wl_pointer_listener,
+                                window)) {
+      LOG("Failed to add wl_pointer listener (%s)", strerror(errno));
+      goto rollback_globals;
+    }
   }
-  static const struct wl_keyboard_listener wl_keyboard_listener = {
-      .keymap = OnWlKeyboardKeymap,
-      .enter = OnWlKeyboardEnter,
-      .leave = OnWlKeyboardLeave,
-      .key = OnWlKeyboardKey,
-      .modifiers = OnWlKeyboardModifiers,
-      .repeat_info = OnWlKeyboardRepeatInfo,
-  };
-  if (wl_keyboard_add_listener(window->wl_keyboard, &wl_keyboard_listener,
-                               window)) {
-    LOG("Failed to add wl_keyboard listener (%s)", strerror(errno));
-    goto rollback_globals;
+  if (window->wl_keyboard) {
+    static const struct wl_keyboard_listener wl_keyboard_listener = {
+        .keymap = OnWlKeyboardKeymap,
+        .enter = OnWlKeyboardEnter,
+        .leave = OnWlKeyboardLeave,
+        .key = OnWlKeyboardKey,
+        .modifiers = OnWlKeyboardModifiers,
+        .repeat_info = OnWlKeyboardRepeatInfo,
+    };
+    if (wl_keyboard_add_listener(window->wl_keyboard, &wl_keyboard_listener,
+                                 window)) {
+      LOG("Failed to add wl_keyboard listener (%s)", strerror(errno));
+      goto rollback_globals;
+    }
   }
   static const struct xdg_wm_base_listener xdg_wm_base_listener = {
       .ping = OnXdgWmBasePing,
@@ -410,30 +427,36 @@ struct Window* WindowCreate(const struct WindowEventHandlers* event_handlers,
     goto rollback_globals;
   }
 
-  window->zwp_locked_pointer_v1 = zwp_pointer_constraints_v1_lock_pointer(
-      window->zwp_pointer_constraints_v1, window->wl_surface,
-      window->wl_pointer, NULL, ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT);
-  if (!window->zwp_locked_pointer_v1) {
-    LOG("Failed to lock wl_pointer (%s)", strerror(errno));
-    goto rollback_globals;
+  if (window->wl_pointer) {
+    window->zwp_locked_pointer_v1 = zwp_pointer_constraints_v1_lock_pointer(
+        window->zwp_pointer_constraints_v1, window->wl_surface,
+        window->wl_pointer, NULL,
+        ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT);
+    if (!window->zwp_locked_pointer_v1) {
+      LOG("Failed to lock wl_pointer (%s)", strerror(errno));
+      goto rollback_globals;
+    }
   }
 
-  window->zwp_relative_pointer_v1 =
-      zwp_relative_pointer_manager_v1_get_relative_pointer(
-          window->zwp_relative_pointer_manager_v1, window->wl_pointer);
-  if (!window->zwp_relative_pointer_v1) {
-    LOG("Failed to get zwp_relative_pointer_v1 (%s)", strerror(errno));
-    goto rollback_zwp_locked_pointer_v1;
-  }
-  static const struct zwp_relative_pointer_v1_listener
-      zwp_relative_pointer_v1_listener = {
-          .relative_motion = OnZwpRelativePointerMotion,
-      };
-  if (zwp_relative_pointer_v1_add_listener(window->zwp_relative_pointer_v1,
-                                           &zwp_relative_pointer_v1_listener,
-                                           window)) {
-    LOG("Failed to add zwp_relative_pointer_v1 listener (%s)", strerror(errno));
-    goto rollback_zwp_relative_pointer_v1;
+  if (window->wl_pointer) {
+    window->zwp_relative_pointer_v1 =
+        zwp_relative_pointer_manager_v1_get_relative_pointer(
+            window->zwp_relative_pointer_manager_v1, window->wl_pointer);
+    if (!window->zwp_relative_pointer_v1) {
+      LOG("Failed to get zwp_relative_pointer_v1 (%s)", strerror(errno));
+      goto rollback_zwp_locked_pointer_v1;
+    }
+    static const struct zwp_relative_pointer_v1_listener
+        zwp_relative_pointer_v1_listener = {
+            .relative_motion = OnZwpRelativePointerMotion,
+        };
+    if (zwp_relative_pointer_v1_add_listener(window->zwp_relative_pointer_v1,
+                                             &zwp_relative_pointer_v1_listener,
+                                             window)) {
+      LOG("Failed to add zwp_relative_pointer_v1 listener (%s)",
+          strerror(errno));
+      goto rollback_zwp_relative_pointer_v1;
+    }
   }
 
   window->xdg_surface =
@@ -473,7 +496,8 @@ struct Window* WindowCreate(const struct WindowEventHandlers* event_handlers,
     LOG("Failed to roundtrip wl_display (%s)", strerror(errno));
     goto rollback_xdg_toplevel;
   }
-  zwp_locked_pointer_v1_set_region(window->zwp_locked_pointer_v1, NULL);
+  if (window->zwp_locked_pointer_v1)
+    zwp_locked_pointer_v1_set_region(window->zwp_locked_pointer_v1, NULL);
   wl_registry_destroy(wl_registry);
   return window;
 
@@ -482,14 +506,18 @@ rollback_xdg_toplevel:
 rollback_xdg_surface:
   xdg_surface_destroy(window->xdg_surface);
 rollback_zwp_relative_pointer_v1:
-  zwp_relative_pointer_v1_destroy(window->zwp_relative_pointer_v1);
+  if (window->zwp_relative_pointer_v1)
+    zwp_relative_pointer_v1_destroy(window->zwp_relative_pointer_v1);
 rollback_zwp_locked_pointer_v1:
-  zwp_locked_pointer_v1_destroy(window->zwp_locked_pointer_v1);
+  if (window->zwp_locked_pointer_v1)
+    zwp_locked_pointer_v1_destroy(window->zwp_locked_pointer_v1);
 rollback_globals:
   if (window->zwp_relative_pointer_manager_v1) {
     zwp_relative_pointer_manager_v1_destroy(
         window->zwp_relative_pointer_manager_v1);
   }
+  if (window->zwp_pointer_constraints_v1)
+    zwp_pointer_constraints_v1_destroy(window->zwp_pointer_constraints_v1);
   if (window->zwp_linux_dmabuf_v1)
     zwp_linux_dmabuf_v1_destroy(window->zwp_linux_dmabuf_v1);
   if (window->xdg_wm_base) xdg_wm_base_destroy(window->xdg_wm_base);
@@ -514,7 +542,7 @@ int WindowGetEventsFd(const struct Window* window) {
 bool WindowProcessEvents(const struct Window* window) {
   bool result = wl_display_dispatch(window->wl_display) != -1;
   if (!result) LOG("Failed to dispatch wl_display (%s)", strerror(errno));
-  return result;
+  return result && !window->was_closed;
 }
 
 static void DestroyBuffers(struct Window* window) {
@@ -580,12 +608,20 @@ void WindowDestroy(struct Window* window) {
   DestroyBuffers(window);
   xdg_toplevel_destroy(window->xdg_toplevel);
   xdg_surface_destroy(window->xdg_surface);
-  zwp_relative_pointer_manager_v1_destroy(
-      window->zwp_relative_pointer_manager_v1);
+  if (window->zwp_relative_pointer_v1)
+    zwp_relative_pointer_v1_destroy(window->zwp_relative_pointer_v1);
+  if (window->zwp_locked_pointer_v1)
+    zwp_locked_pointer_v1_destroy(window->zwp_locked_pointer_v1);
+  if (window->zwp_relative_pointer_manager_v1) {
+    zwp_relative_pointer_manager_v1_destroy(
+        window->zwp_relative_pointer_manager_v1);
+  }
+  if (window->zwp_pointer_constraints_v1)
+    zwp_pointer_constraints_v1_destroy(window->zwp_pointer_constraints_v1);
   zwp_linux_dmabuf_v1_destroy(window->zwp_linux_dmabuf_v1);
   xdg_wm_base_destroy(window->xdg_wm_base);
-  wl_keyboard_release(window->wl_keyboard);
-  wl_pointer_release(window->wl_pointer);
+  if (window->wl_keyboard) wl_keyboard_release(window->wl_keyboard);
+  if (window->wl_pointer) wl_pointer_release(window->wl_pointer);
   wl_surface_destroy(window->wl_surface);
   wl_display_disconnect(window->wl_display);
   free(window);
