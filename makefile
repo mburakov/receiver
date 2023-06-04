@@ -3,7 +3,11 @@ src:=$(wildcard *.c)
 obj:=$(src:.c=.o)
 
 obj+=\
-	toolbox/buffer.o
+	pui/font.o \
+	pui/font_cp00.o \
+	pui/font_cp04.o \
+	toolbox/buffer.o \
+	toolbox/perf.o
 
 libs:=\
 	libva \

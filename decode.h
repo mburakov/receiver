@@ -25,8 +25,14 @@ struct DecodeContext;
 struct Frame;
 struct Window;
 
+struct DecodeStats {
+  size_t bitrate;
+};
+
 struct DecodeContext* DecodeContextCreate(struct Window* window);
 bool DecodeContextDecode(struct DecodeContext* decode_context, int fd);
+void DecodeContextGetStats(struct DecodeContext* decode_context,
+                           struct DecodeStats* decode_stats);
 void DecodeContextDestroy(struct DecodeContext* decode_context);
 
 #endif  // RECEIVER_DECODE_H_

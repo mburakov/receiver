@@ -51,6 +51,8 @@ struct DecodeContext {
 
   struct Buffer buffer;
   struct Surface** surfaces;
+
+  size_t bitrate;
 };
 
 static const char* VaStatusString(VAStatus status) {
@@ -492,8 +494,15 @@ again:
     }
 
     BufferDiscard(&decode_context->buffer, sizeof(uint32_t) + packet_size);
+    decode_context->bitrate += (sizeof(uint32_t) + packet_size) * 8;
     goto again;
   }
+}
+
+void DecodeContextGetStats(struct DecodeContext* decode_context,
+                           struct DecodeStats* decode_stats) {
+  decode_stats->bitrate = decode_context->bitrate;
+  decode_context->bitrate = 0;
 }
 
 void DecodeContextDestroy(struct DecodeContext* decode_context) {

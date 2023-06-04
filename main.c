@@ -30,11 +30,13 @@
 
 #include "decode.h"
 #include "input.h"
+#include "pui/font.h"
+#include "toolbox/perf.h"
 #include "toolbox/utils.h"
 #include "window.h"
 
 #define OVERLAY_WIDTH 256
-#define OVERLAY_HEIGHT 64
+#define OVERLAY_HEIGHT 20
 
 static volatile sig_atomic_t g_signal;
 static void OnSignal(int status) { g_signal = status; }
@@ -145,18 +147,28 @@ static void DecodeContextDtor(struct DecodeContext** decode_context) {
   *decode_context = NULL;
 }
 
-static void RenderOverlay(struct Overlay* overlay) {
+static void RenderOverlay(struct Overlay* overlay, uint64_t clock_delta,
+                          const struct DecodeStats* decode_stats) {
   uint32_t* buffer = OverlayLock(overlay);
   if (!buffer) {
     LOG("Failed to lock overlay");
     return;
   }
 
-  for (int y = 0; y < OVERLAY_HEIGHT; y++) {
-    for (int x = 0; x < OVERLAY_WIDTH; x++) {
+  char bitrate[64];
+  snprintf(bitrate, sizeof(bitrate), "Bitrate: %zu Kbps",
+           decode_stats->bitrate * 1000000 / clock_delta / 1024);
+  size_t overlay_width = PuiStringWidth(bitrate) + 8;
+
+  memset(buffer, 0, OVERLAY_HEIGHT * OVERLAY_WIDTH * 4);
+  for (size_t y = 0; y < OVERLAY_HEIGHT; y++) {
+    for (size_t x = 0; x < overlay_width; x++)
       buffer[x + y * OVERLAY_WIDTH] = 0x40000000;
-    }
   }
+
+  PuiStringRender(bitrate, buffer + OVERLAY_WIDTH * 4 + 4, OVERLAY_WIDTH,
+                  0xffffffff);
+
   OverlayUnlock(overlay);
 }
 
@@ -205,7 +217,7 @@ int main(int argc, char* argv[]) {
 
   struct Overlay __attribute__((cleanup(OverlayDtor)))* overlay = NULL;
   if (stats) {
-    overlay = OverlayCreate(window, 0, 0, OVERLAY_WIDTH, OVERLAY_HEIGHT);
+    overlay = OverlayCreate(window, 4, 4, OVERLAY_WIDTH, OVERLAY_HEIGHT);
     if (!overlay) {
       LOG("Failed to create overlay");
       return EXIT_FAILURE;
@@ -232,6 +244,7 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
+  uint64_t before = MicrosNow();
   while (!g_signal) {
     struct pollfd pfds[] = {
         {.fd = sock, .events = POLLIN},
@@ -249,7 +262,17 @@ int main(int argc, char* argv[]) {
       default:
         break;
     }
-    if (overlay) RenderOverlay(overlay);
+    if (overlay) {
+      uint64_t after = MicrosNow();
+      static const uint64_t timeout = 5 * 1000 * 1000;
+      uint64_t time_delta = after - before;
+      if (time_delta > timeout) {
+        struct DecodeStats decode_stats;
+        DecodeContextGetStats(decode_context, &decode_stats);
+        RenderOverlay(overlay, time_delta, &decode_stats);
+        before = after;
+      }
+    }
     if (pfds[0].revents && !DecodeContextDecode(decode_context, sock)) {
       LOG("Failed to decode incoming data");
       return EXIT_FAILURE;
