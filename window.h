@@ -23,6 +23,7 @@
 
 struct Window;
 struct Frame;
+struct Overlay;
 
 struct WindowEventHandlers {
   void (*OnClose)(void* user);
@@ -41,5 +42,11 @@ bool WindowAssignFrames(struct Window* window, size_t nframes,
                         const struct Frame* frames);
 bool WindowShowFrame(struct Window* window, size_t index);
 void WindowDestroy(struct Window* window);
+
+struct Overlay* OverlayCreate(const struct Window* window, int x, int y,
+                              int width, int height);
+void* OverlayLock(struct Overlay* overlay);
+void OverlayUnlock(struct Overlay* overlay);
+void OverlayDestroy(struct Overlay* overlay);
 
 #endif  // RECEIVER_WINDOW_H_

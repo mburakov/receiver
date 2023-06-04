@@ -17,11 +17,16 @@
 
 #include "window.h"
 
+#include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <wayland-client.h>
 
 #include "frame.h"
@@ -30,6 +35,8 @@
 #include "relative-pointer-unstable-v1.h"
 #include "toolbox/utils.h"
 #include "xdg-shell.h"
+
+#define OVERLAY_BUFFERS_COUNT 2
 
 // TODO(mburakov): This would look like shit until Wayland guys finally fix
 // https://gitlab.freedesktop.org/wayland/wayland/-/issues/160
@@ -42,7 +49,9 @@ struct Window {
   struct wl_display* wl_display;
   struct wl_registry* wl_registry;
   struct wl_compositor* wl_compositor;
+  struct wl_shm* wl_shm;
   struct wl_seat* wl_seat;
+  struct wl_subcompositor* wl_subcompositor;
   struct xdg_wm_base* xdg_wm_base;
   struct zwp_linux_dmabuf_v1* zwp_linux_dmabuf_v1;
   struct zwp_pointer_constraints_v1* zwp_pointer_constraints_v1;
@@ -65,6 +74,18 @@ struct Window {
   bool was_closed;
 };
 
+struct Overlay {
+  int width;
+  int height;
+  int shm_fd;
+  void* shm_buffer;
+  struct wl_surface* wl_surface;
+  struct wl_subsurface* wl_subsurface;
+  struct wl_shm_pool* wl_shm_pool;
+  struct wl_buffer* wl_buffers[OVERLAY_BUFFERS_COUNT];
+  size_t wl_buffer_current;
+};
+
 static void OnWlRegistryGlobal(void* data, struct wl_registry* wl_registry,
                                uint32_t name, const char* interface,
                                uint32_t version) {
@@ -77,7 +98,9 @@ static void OnWlRegistryGlobal(void* data, struct wl_registry* wl_registry,
   }
   struct Window* window = data;
   MAYBE_BIND(wl_compositor)
+  MAYBE_BIND(wl_shm)
   MAYBE_BIND(wl_seat)
+  MAYBE_BIND(wl_subcompositor)
   MAYBE_BIND(xdg_wm_base)
   MAYBE_BIND(zwp_linux_dmabuf_v1)
   MAYBE_BIND(zwp_pointer_constraints_v1)
@@ -150,7 +173,10 @@ rollback_globals:
   if (window->zwp_linux_dmabuf_v1)
     zwp_linux_dmabuf_v1_destroy(window->zwp_linux_dmabuf_v1);
   if (window->xdg_wm_base) xdg_wm_base_destroy(window->xdg_wm_base);
+  if (window->wl_subcompositor)
+    wl_subcompositor_destroy(window->wl_subcompositor);
   if (window->wl_seat) wl_seat_destroy(window->wl_seat);
+  if (window->wl_shm) wl_shm_destroy(window->wl_shm);
   if (window->wl_compositor) wl_compositor_destroy(window->wl_compositor);
 rollback_wl_registry:
   wl_registry_destroy(window->wl_registry);
@@ -516,7 +542,9 @@ static void DeinitWaylandGlobals(struct Window* window) {
   zwp_pointer_constraints_v1_destroy(window->zwp_pointer_constraints_v1);
   zwp_linux_dmabuf_v1_destroy(window->zwp_linux_dmabuf_v1);
   xdg_wm_base_destroy(window->xdg_wm_base);
+  wl_subcompositor_destroy(window->wl_subcompositor);
   wl_seat_destroy(window->wl_seat);
+  wl_shm_destroy(window->wl_shm);
   wl_compositor_destroy(window->wl_compositor);
   wl_registry_destroy(window->wl_registry);
   wl_display_disconnect(window->wl_display);
@@ -649,4 +677,124 @@ void WindowDestroy(struct Window* window) {
   DeinitWaylandToplevel(window);
   DeinitWaylandGlobals(window);
   free(window);
+}
+
+struct Overlay* OverlayCreate(const struct Window* window, int x, int y,
+                              int width, int height) {
+  ssize_t stride = width * 4;
+  ssize_t buffer_size = stride * height;
+  ssize_t pool_size = OVERLAY_BUFFERS_COUNT * buffer_size;
+  if (pool_size > INT32_MAX || width < 0 || height < 0) {
+    LOG("Suspicious overlay size %ux%u", width, height);
+    return NULL;
+  }
+
+  struct Overlay* overlay = malloc(sizeof(struct Overlay));
+  if (!overlay) {
+    LOG("Failed to allocate overlay (%s)", strerror(errno));
+    return NULL;
+  }
+  *overlay = (struct Overlay){
+      .width = width,
+      .height = height,
+      .shm_fd = -1,
+  };
+
+  char name[64];
+  static size_t counter = 0;
+  snprintf(name, sizeof(name), "/wl_shm-%d-%zu", getpid(), counter++);
+  overlay->shm_fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+  if (overlay->shm_fd == -1) {
+    LOG("Failed to open shm (%s)", strerror(errno));
+    goto rollback_overlay;
+  }
+  shm_unlink(name);
+
+  if (ftruncate(overlay->shm_fd, pool_size) == -1) {
+    LOG("Failed to truncate shm (%s)", strerror(errno));
+    goto rollback_shm_fd;
+  }
+  overlay->shm_buffer = mmap(NULL, (size_t)pool_size, PROT_READ | PROT_WRITE,
+                             MAP_SHARED, overlay->shm_fd, 0);
+  if (!overlay->shm_buffer) {
+    LOG("Failed to mmap shm (%s)", strerror(errno));
+    goto rollback_shm_fd;
+  }
+
+  overlay->wl_surface = wl_compositor_create_surface(window->wl_compositor);
+  if (!overlay->wl_surface) {
+    LOG("Failed to create wl_surface (%s)", strerror(errno));
+    goto rollback_shm_buffer;
+  }
+
+  overlay->wl_subsurface = wl_subcompositor_get_subsurface(
+      window->wl_subcompositor, overlay->wl_surface, window->wl_surface);
+  if (!overlay->wl_subsurface) {
+    LOG("Failed to create wl_subsurface (%s)", strerror(errno));
+    goto rollback_wl_surface;
+  }
+  wl_subsurface_place_above(overlay->wl_subsurface, window->wl_surface);
+  wl_subsurface_set_position(overlay->wl_subsurface, x, y);
+
+  overlay->wl_shm_pool =
+      wl_shm_create_pool(window->wl_shm, overlay->shm_fd, (int32_t)pool_size);
+  if (!overlay->wl_shm_pool) {
+    LOG("Failed to create wl_shm_pool (%s)", strerror(errno));
+    goto rollback_wl_subsurface;
+  }
+
+  int i = 0;
+  for (; i < OVERLAY_BUFFERS_COUNT; i++) {
+    overlay->wl_buffers[i] = wl_shm_pool_create_buffer(
+        overlay->wl_shm_pool, (int)(i * buffer_size), overlay->width,
+        overlay->height, (int)stride, WL_SHM_FORMAT_ARGB8888);
+    if (!overlay->wl_buffers[i]) {
+      LOG("Failed to create wl_buffer (%s)", strerror(errno));
+      goto rollback_wl_buffers;
+    }
+  }
+  return overlay;
+
+rollback_wl_buffers:
+  for (; i; i--) wl_buffer_destroy(overlay->wl_buffers[i - 1]);
+  wl_shm_pool_destroy(overlay->wl_shm_pool);
+rollback_wl_subsurface:
+  wl_subsurface_destroy(overlay->wl_subsurface);
+rollback_wl_surface:
+  wl_surface_destroy(overlay->wl_surface);
+rollback_shm_buffer:
+  munmap(overlay->shm_buffer, (size_t)pool_size);
+rollback_shm_fd:
+  close(overlay->shm_fd);
+rollback_overlay:
+  free(overlay);
+  return NULL;
+}
+
+void* OverlayLock(struct Overlay* overlay) {
+  ssize_t stride = overlay->width * 4;
+  ssize_t buffer_size = stride * overlay->height;
+  size_t next = (overlay->wl_buffer_current + 1) % OVERLAY_BUFFERS_COUNT;
+  return (uint8_t*)overlay->shm_buffer + (size_t)buffer_size * next;
+}
+
+void OverlayUnlock(struct Overlay* overlay) {
+  size_t next = (overlay->wl_buffer_current + 1) % OVERLAY_BUFFERS_COUNT;
+  wl_surface_attach(overlay->wl_surface, overlay->wl_buffers[next], 0, 0);
+  wl_surface_damage(overlay->wl_surface, 0, 0, INT32_MAX, INT32_MAX);
+  wl_surface_commit(overlay->wl_surface);
+  overlay->wl_buffer_current = next;
+}
+
+void OverlayDestroy(struct Overlay* overlay) {
+  for (int i = OVERLAY_BUFFERS_COUNT; i; i--)
+    wl_buffer_destroy(overlay->wl_buffers[i - 1]);
+  wl_shm_pool_destroy(overlay->wl_shm_pool);
+  wl_subsurface_destroy(overlay->wl_subsurface);
+  wl_surface_destroy(overlay->wl_surface);
+  ssize_t pool_size =
+      OVERLAY_BUFFERS_COUNT * overlay->width * overlay->height * 4;
+  munmap(overlay->shm_buffer, (size_t)(pool_size));
+  close(overlay->shm_fd);
+  free(overlay);
 }
