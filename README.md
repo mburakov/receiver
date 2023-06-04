@@ -1,6 +1,6 @@
 # Receiver
 
-This is a lightweight streaming client that works together with [streamer](https://github.com/mburakov/streamer) server. It receives encoded HEVC bitstream over tcp connection, decodes it using Intel Media SDK, and renders the resulting buffers using Wayland. Everything is done hardware-accelerated and zero-copy. Receiver listens for input events from a Wayland compositor, converts those to UHID messages, and sends those to streamer server over the same tcp connection.
+This is a lightweight streaming client that works together with [streamer](https://burakov.eu/streamer.git) server. It receives encoded HEVC bitstream over tcp connection, decodes it using Intel Media SDK, and renders the resulting buffers using Wayland. Everything is done hardware-accelerated and zero-copy. Receiver listens for input events from a Wayland compositor, converts those to UHID messages, and sends those to streamer server over the same tcp connection.
 
 ## Building on Linux
 
@@ -29,7 +29,7 @@ There are couple of things receiver implies, i.e. that your system is supported 
 
 This is certainly the case with any recent Intel CPU and sway compositor. It would probably work with other wlroots-based compositors too. I never cared enough to check if Intel Media SDK works on AMD systems. In case it does, receiver would work on AMD hardware as well. Nvidia configurations are certainly not supported. Not just VA-API, but also linux-dmabuf-unstable-v1 Wayland protocol are not expected to work. So no Nvidia please.
 
-Provide ip address and port number of listening [streamer](https://github.com/mburakov/streamer) instance on the commandline:
+Provide ip address and port number of listening [streamer](https://burakov/streamer.git) instance on the commandline:
 ```
 ./receiver 192.168.8.5:1337
 ```
@@ -60,7 +60,7 @@ This is correct, audio streaming is not supported as of today. Actually pulseaud
 
 ## Fancy features support status
 
-There are no fancy features in streamer. There's no bitrate control - libavcodec configuration selects constant image quality over constant bitrate. There's no frame pacing - because I personally consider it useless for low-latency realtime streaming. There's no network discovery. There's no automatic reconnection. There's no codec selection. There's no fancy configuration interface. There are no options at all. I might consider implementing some of that in the future - or might not, because it works perfectly fine for my use-case in its current state.
+There are no fancy features in streamer. There's no bitrate control - VA-API configuration selects constant image quality over constant bitrate. There's no frame pacing - because I personally consider it useless for low-latency realtime streaming. There's no network discovery. There's no automatic reconnection. There's no codec selection. There's no fancy configuration interface. There are no options at all. I might consider implementing some of that in the future - or might not, because it works perfectly fine for my use-case in its current state.
 
 At the same time, it addresses all of the issues listed above for Steam Link and Sunshine/Moonlight. No issues with controls, no issue with video quality, no issues with screen capturing. On top of that instant startup and shutdown both on server- and client-side.
 
