@@ -33,6 +33,9 @@
 #include "toolbox/utils.h"
 #include "window.h"
 
+#define OVERLAY_WIDTH 256
+#define OVERLAY_HEIGHT 64
+
 static volatile sig_atomic_t g_signal;
 static void OnSignal(int status) { g_signal = status; }
 
@@ -130,25 +133,48 @@ static void WindowDtor(struct Window** window) {
   *window = NULL;
 }
 
+static void OverlayDtor(struct Overlay** overlay) {
+  if (!*overlay) return;
+  OverlayDestroy(*overlay);
+  *overlay = NULL;
+}
+
 static void DecodeContextDtor(struct DecodeContext** decode_context) {
   if (!*decode_context) return;
   DecodeContextDestroy(*decode_context);
   *decode_context = NULL;
 }
 
+static void RenderOverlay(struct Overlay* overlay) {
+  uint32_t* buffer = OverlayLock(overlay);
+  if (!buffer) {
+    LOG("Failed to lock overlay");
+    return;
+  }
+
+  for (int y = 0; y < OVERLAY_HEIGHT; y++) {
+    for (int x = 0; x < OVERLAY_WIDTH; x++) {
+      buffer[x + y * OVERLAY_WIDTH] = 0x40000000;
+    }
+  }
+  OverlayUnlock(overlay);
+}
+
 int main(int argc, char* argv[]) {
   if (argc < 2) {
-    LOG("Usage: %s <ip>:<port> [--no-input]", argv[0]);
+    LOG("Usage: %s <ip>:<port> [--no-input] [--stats]", argv[0]);
     return EXIT_FAILURE;
   }
   int __attribute__((cleanup(SocketDtor))) sock = ConnectSocket(argv[1]);
   if (sock == -1) return EXIT_FAILURE;
 
   bool no_input = false;
+  bool stats = false;
   for (int i = 2; i < argc; i++) {
     if (!strcmp(argv[i], "--no-input")) {
       no_input = true;
-      break;
+    } else if (!strcmp(argv[i], "--stats")) {
+      stats = true;
     }
   }
   struct InputStream
@@ -175,6 +201,15 @@ int main(int argc, char* argv[]) {
   if (!window) {
     LOG("Failed to create window");
     return EXIT_FAILURE;
+  }
+
+  struct Overlay __attribute__((cleanup(OverlayDtor)))* overlay = NULL;
+  if (stats) {
+    overlay = OverlayCreate(window, 0, 0, OVERLAY_WIDTH, OVERLAY_HEIGHT);
+    if (!overlay) {
+      LOG("Failed to create overlay");
+      return EXIT_FAILURE;
+    }
   }
 
   struct DecodeContext
@@ -214,6 +249,7 @@ int main(int argc, char* argv[]) {
       default:
         break;
     }
+    if (overlay) RenderOverlay(overlay);
     if (pfds[0].revents && !DecodeContextDecode(decode_context, sock)) {
       LOG("Failed to decode incoming data");
       return EXIT_FAILURE;
