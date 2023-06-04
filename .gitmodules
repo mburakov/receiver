@@ -1,3 +1,6 @@
 [submodule "toolbox"]
 	path = toolbox
 	url = https://burakov.eu/toolbox.git
+[submodule "pui"]
+	path = pui
+	url = https://burakov.eu/pui.git
