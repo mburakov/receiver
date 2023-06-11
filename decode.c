@@ -30,7 +30,6 @@
 #include <va/va_drmcommon.h>
 
 #include "frame.h"
-#include "toolbox/buffer.h"
 #include "toolbox/utils.h"
 #include "window.h"
 
@@ -48,11 +47,7 @@ struct DecodeContext {
   int drm_fd;
   VADisplay va_display;
   mfxSession mfx_session;
-
-  struct Buffer buffer;
   struct Surface** surfaces;
-
-  size_t bitrate;
 };
 
 static const char* VaStatusString(VAStatus status) {
@@ -411,35 +406,14 @@ static size_t UnlockAllSurfaces(struct DecodeContext* decode_context,
   return result;
 }
 
-bool DecodeContextDecode(struct DecodeContext* decode_context, int fd) {
-  switch (BufferAppendFrom(&decode_context->buffer, fd)) {
-    case -1:
-      LOG("Failed to append packet data to buffer (%s)", strerror(errno));
-      return false;
-    case 0:
-      LOG("Server closed connection");
-      return false;
-    default:
-      break;
-  }
-
-again:
-  if (decode_context->buffer.size < sizeof(uint32_t)) {
-    // mburakov: Packet size is not yet available.
-    return true;
-  }
-  uint32_t packet_size = *(uint32_t*)decode_context->buffer.data;
-  if (decode_context->buffer.size < sizeof(uint32_t) + packet_size) {
-    // mburakov: Full packet is not yet available.
-    return true;
-  }
-
+bool DecodeContextDecode(struct DecodeContext* decode_context,
+                         const void* buffer, size_t size) {
   mfxBitstream bitstream = {
       .DecodeTimeStamp = MFX_TIMESTAMP_UNKNOWN,
       .TimeStamp = (mfxU64)MFX_TIMESTAMP_UNKNOWN,
-      .Data = (mfxU8*)decode_context->buffer.data + sizeof(uint32_t),
-      .DataLength = packet_size,
-      .MaxLength = packet_size,
+      .Data = (void*)(ptrdiff_t)buffer,
+      .DataLength = (mfxU32)size,
+      .MaxLength = (mfxU32)size,
       .DataFlag = MFX_BITSTREAM_COMPLETE_FRAME,
   };
 
@@ -493,20 +467,11 @@ again:
       return false;
     }
 
-    BufferDiscard(&decode_context->buffer, sizeof(uint32_t) + packet_size);
-    decode_context->bitrate += (sizeof(uint32_t) + packet_size) * 8;
-    goto again;
+    return true;
   }
 }
 
-void DecodeContextGetStats(struct DecodeContext* decode_context,
-                           struct DecodeStats* decode_stats) {
-  decode_stats->bitrate = decode_context->bitrate;
-  decode_context->bitrate = 0;
-}
-
 void DecodeContextDestroy(struct DecodeContext* decode_context) {
-  BufferDestroy(&decode_context->buffer);
   MFXClose(decode_context->mfx_session);
   vaTerminate(decode_context->va_display);
   close(decode_context->drm_fd);

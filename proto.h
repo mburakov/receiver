@@ -15,18 +15,27 @@
  * along with receiver.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#ifndef RECEIVER_DECODE_H_
-#define RECEIVER_DECODE_H_
+#ifndef RECEIVER_PROTO_H_
+#define RECEIVER_PROTO_H_
 
-#include <stdbool.h>
-#include <stddef.h>
+#include <assert.h>
+#include <stdint.h>
 
-struct DecodeContext;
-struct Window;
+#define PROTO_TYPE_MISC 0
+#define PROTO_TYPE_VIDEO 1
+#define PROTO_TYPE_AUDIO 2
 
-struct DecodeContext* DecodeContextCreate(struct Window* window);
-bool DecodeContextDecode(struct DecodeContext* decode_context,
-                         const void* buffer, size_t size);
-void DecodeContextDestroy(struct DecodeContext* decode_context);
+#define PROTO_FLAG_KEYFRAME 1
 
-#endif  // RECEIVER_DECODE_H_
+struct Proto {
+  uint32_t size;
+  uint8_t type;
+  uint8_t flags;
+  uint16_t latency;
+  uint8_t data[];
+};
+
+static_assert(sizeof(struct Proto) == 8 * sizeof(uint8_t),
+              "Suspicious proto struct size");
+
+#endif  // RECEIVER_PROTO_H_
