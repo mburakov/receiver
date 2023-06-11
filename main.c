@@ -17,6 +17,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <limits.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -35,11 +36,9 @@
 #include "toolbox/utils.h"
 #include "window.h"
 
-#define OVERLAY_WIDTH 256
-#define OVERLAY_HEIGHT 20
-
 static volatile sig_atomic_t g_signal;
 static void OnSignal(int status) { g_signal = status; }
+static size_t overlay_width, overlay_height;
 
 static void SocketDtor(int* sock) {
   if (*sock == -1) return;
@@ -147,6 +146,13 @@ static void DecodeContextDtor(struct DecodeContext** decode_context) {
   *decode_context = NULL;
 }
 
+static void GetMaxOverlaySize(size_t* width, size_t* height) {
+  char str[64];
+  snprintf(str, sizeof(str), "Bitrate: %zu.000 Mbps", SIZE_MAX / 1000);
+  *width = PuiStringWidth(str) + 8;
+  *height = 20;
+}
+
 static void RenderOverlay(struct Overlay* overlay, uint64_t clock_delta,
                           const struct DecodeStats* decode_stats) {
   uint32_t* buffer = OverlayLock(overlay);
@@ -155,20 +161,20 @@ static void RenderOverlay(struct Overlay* overlay, uint64_t clock_delta,
     return;
   }
 
-  char bitrate[64];
-  snprintf(bitrate, sizeof(bitrate), "Bitrate: %zu Kbps",
-           decode_stats->bitrate * 1000000 / clock_delta / 1024);
-  size_t overlay_width = PuiStringWidth(bitrate) + 8;
+  char str[64];
+  size_t bitrate = decode_stats->bitrate * 1000000 / clock_delta / 1024;
+  snprintf(str, sizeof(str), "Bitrate: %zu.%03zu Mbps", bitrate / 1000,
+           bitrate % 1000);
+  size_t width = PuiStringWidth(str) + 8;
 
-  memset(buffer, 0, OVERLAY_HEIGHT * OVERLAY_WIDTH * 4);
-  for (size_t y = 0; y < OVERLAY_HEIGHT; y++) {
-    for (size_t x = 0; x < overlay_width; x++)
-      buffer[x + y * OVERLAY_WIDTH] = 0x40000000;
+  memset(buffer, 0, overlay_width * overlay_height * 4);
+  for (size_t y = 0; y < overlay_height; y++) {
+    for (size_t x = 0; x < width; x++)
+      buffer[x + y * overlay_width] = 0x40000000;
   }
 
-  PuiStringRender(bitrate, buffer + OVERLAY_WIDTH * 4 + 4, OVERLAY_WIDTH,
-                  0xffffffff);
-
+  size_t voffset = overlay_width * 4;
+  PuiStringRender(str, buffer + voffset + 4, overlay_width, 0xffffffff);
   OverlayUnlock(overlay);
 }
 
@@ -217,7 +223,9 @@ int main(int argc, char* argv[]) {
 
   struct Overlay __attribute__((cleanup(OverlayDtor)))* overlay = NULL;
   if (stats) {
-    overlay = OverlayCreate(window, 4, 4, OVERLAY_WIDTH, OVERLAY_HEIGHT);
+    GetMaxOverlaySize(&overlay_width, &overlay_height);
+    overlay =
+        OverlayCreate(window, 4, 4, (int)overlay_width, (int)overlay_height);
     if (!overlay) {
       LOG("Failed to create overlay");
       return EXIT_FAILURE;
