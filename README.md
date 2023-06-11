@@ -64,6 +64,6 @@ There are no fancy features in streamer. There's no bitrate control - VA-API con
 
 At the same time, it addresses all of the issues listed above for Steam Link and Sunshine/Moonlight. No issues with controls, no issue with video quality, no issues with screen capturing. On top of that instant startup and shutdown both on server- and client-side.
 
-## Where is toolbox?
+## Where is toolbox and pui?
 
-Note, that I don't use github for actual development anymore - it's just a mirror these days. Instead, I self-host git repos on https://burakov.eu. Read-only access is provided via cgit, i.e.: https://burakov.eu/receiver.git. Same stands for toolbox submodule, which is fetched via https using git commandline. You can as well access the code of toolbox directly using your browser: https://burakov.eu/toolbox.git.
+Note, that I don't use github for actual development anymore - it's just a mirror these days. Instead, I self-host git repos on https://burakov.eu. Read-only access is provided via cgit, i.e.: https://burakov.eu/receiver.git. Same stands for toolbox and pui (primitive ui) submodules, which are fetched via https using git commandline. You can as well access the code of toolbox and pui directly using your browser: https://burakov.eu/toolbox.git, https://burakov.eu/pui.git.
