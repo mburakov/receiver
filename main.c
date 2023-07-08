@@ -55,6 +55,8 @@ struct Context {
   uint64_t timestamp;
   uint64_t ping_sum;
   uint64_t ping_count;
+  uint64_t latency_sum;
+  uint64_t latency_count;
 };
 
 static int ConnectSocket(const char* arg) {
@@ -136,8 +138,8 @@ static void OnWindowWheel(void* user, int delta) {
 static void GetMaxOverlaySize(size_t* width, size_t* height) {
   char str[64];
   snprintf(str, sizeof(str), "Bitrate: %zu.000 Mbps", SIZE_MAX / 1000);
-  *width = PuiStringWidth(str) + 8;
-  *height = 32;
+  *width = 4 + PuiStringWidth(str) + 4;
+  *height = 4 + 12 * 3 + 4;
 }
 
 static struct Context* ContextCreate(int sock, bool no_input, bool stats) {
@@ -210,17 +212,32 @@ static bool RenderOverlay(struct Context* context, uint64_t timestamp) {
 
   char bitrate_str[64];
   uint64_t clock_delta = timestamp - context->timestamp;
-  size_t bitrate = context->video_bitstream * 1000000 / clock_delta / 1024;
+  size_t bitrate = context->video_bitstream * 1000000 * 8 / clock_delta / 1024;
   snprintf(bitrate_str, sizeof(bitrate_str), "Bitrate: %zu.%03zu Mbps",
            bitrate / 1000, bitrate % 1000);
 
   char ping_str[64];
-  uint64_t ping = context->ping_sum / context->ping_count;
+  uint64_t ping = 0;
+  if (context->ping_count) {
+    ping = context->ping_sum / context->ping_count;
+  }
   snprintf(ping_str, sizeof(ping_str), "Ping: %zu.%03zu ms", ping / 1000,
            ping % 1000);
 
+  char latency_str[64];
+  uint64_t latency = 0;
+  if (context->latency_count) {
+    // mburakov: Pessimistic calculations, these assume one fully missed vsync
+    // for capture, one fully missed vsync for rendering, and 100Mbit network.
+    latency = context->latency_sum / context->latency_count + ping + 16666 +
+              16666 + bitrate * 1000000 / 100000000 / context->latency_count;
+  }
+  snprintf(latency_str, sizeof(latency_str), "Latency: %zu.%03zu ms",
+           latency / 1000, latency % 1000);
+
   size_t overlay_width =
-      MAX(PuiStringWidth(bitrate_str), PuiStringWidth(ping_str)) + 8;
+      MAX(PuiStringWidth(bitrate_str), PuiStringWidth(ping_str));
+  overlay_width = MAX(overlay_width, PuiStringWidth(latency_str)) + 8;
   memset(buffer, 0, context->overlay_width * context->overlay_height * 4);
   for (size_t y = 0; y < context->overlay_height; y++) {
     for (size_t x = 0; x < overlay_width; x++)
@@ -230,6 +247,8 @@ static bool RenderOverlay(struct Context* context, uint64_t timestamp) {
   PuiStringRender(bitrate_str, buffer + context->overlay_width * 4 + 4,
                   context->overlay_width, 0xffffffff);
   PuiStringRender(ping_str, buffer + context->overlay_width * 16 + 4,
+                  context->overlay_width, 0xffffffff);
+  PuiStringRender(latency_str, buffer + context->overlay_width * 28 + 4,
                   context->overlay_width, 0xffffffff);
   OverlayUnlock(context->overlay);
   return true;
@@ -249,6 +268,9 @@ static bool HandleVideoStream(struct Context* context) {
   }
 
   context->video_bitstream += proto->size;
+  context->latency_sum += proto->latency;
+  context->latency_count++;
+
   if (!(proto->flags & PROTO_FLAG_KEYFRAME)) return true;
 
   uint64_t timestamp = MicrosNow();
@@ -257,6 +279,8 @@ static bool HandleVideoStream(struct Context* context) {
   context->timestamp = timestamp;
   context->ping_sum = 0;
   context->ping_count = 0;
+  context->latency_sum = 0;
+  context->latency_count = 0;
   return true;
 }
 
