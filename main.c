@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/timerfd.h>
 #include <unistd.h>
 
 #include "decode.h"
@@ -52,6 +53,8 @@ struct Context {
 
   size_t video_bitstream;
   uint64_t timestamp;
+  uint64_t ping_sum;
+  uint64_t ping_count;
 };
 
 static int ConnectSocket(const char* arg) {
@@ -134,7 +137,7 @@ static void GetMaxOverlaySize(size_t* width, size_t* height) {
   char str[64];
   snprintf(str, sizeof(str), "Bitrate: %zu.000 Mbps", SIZE_MAX / 1000);
   *width = PuiStringWidth(str) + 8;
-  *height = 20;
+  *height = 32;
 }
 
 static struct Context* ContextCreate(int sock, bool no_input, bool stats) {
@@ -205,22 +208,29 @@ static bool RenderOverlay(struct Context* context, uint64_t timestamp) {
     return false;
   }
 
-  char str[64];
+  char bitrate_str[64];
   uint64_t clock_delta = timestamp - context->timestamp;
   size_t bitrate = context->video_bitstream * 1000000 / clock_delta / 1024;
-  snprintf(str, sizeof(str), "Bitrate: %zu.%03zu Mbps", bitrate / 1000,
-           bitrate % 1000);
+  snprintf(bitrate_str, sizeof(bitrate_str), "Bitrate: %zu.%03zu Mbps",
+           bitrate / 1000, bitrate % 1000);
 
-  size_t overlay_width = PuiStringWidth(str) + 8;
+  char ping_str[64];
+  uint64_t ping = context->ping_sum / context->ping_count;
+  snprintf(ping_str, sizeof(ping_str), "Ping: %zu.%03zu ms", ping / 1000,
+           ping % 1000);
+
+  size_t overlay_width =
+      MAX(PuiStringWidth(bitrate_str), PuiStringWidth(ping_str)) + 8;
   memset(buffer, 0, context->overlay_width * context->overlay_height * 4);
   for (size_t y = 0; y < context->overlay_height; y++) {
     for (size_t x = 0; x < overlay_width; x++)
       buffer[x + y * context->overlay_width] = 0x40000000;
   }
 
-  size_t voffset = context->overlay_width * 4;
-  PuiStringRender(str, buffer + voffset + 4, context->overlay_width,
-                  0xffffffff);
+  PuiStringRender(bitrate_str, buffer + context->overlay_width * 4 + 4,
+                  context->overlay_width, 0xffffffff);
+  PuiStringRender(ping_str, buffer + context->overlay_width * 16 + 4,
+                  context->overlay_width, 0xffffffff);
   OverlayUnlock(context->overlay);
   return true;
 }
@@ -245,6 +255,8 @@ static bool HandleVideoStream(struct Context* context) {
   if (!RenderOverlay(context, timestamp)) LOG("Failed to render overlay");
   context->video_bitstream = 0;
   context->timestamp = timestamp;
+  context->ping_sum = 0;
+  context->ping_count = 0;
   return true;
 }
 
@@ -266,6 +278,11 @@ again:
   if (context->buffer.size < sizeof(struct Proto) + proto->size) return true;
 
   switch (proto->type) {
+    case PROTO_TYPE_MISC:
+      context->ping_sum +=
+          MicrosNow() - *(const uint64_t*)(const void*)proto->data;
+      context->ping_count++;
+      break;
     case PROTO_TYPE_VIDEO:
       if (!HandleVideoStream(context)) {
         LOG("Failed to handle video stream");
@@ -276,6 +293,29 @@ again:
 
   BufferDiscard(&context->buffer, sizeof(struct Proto) + proto->size);
   goto again;
+}
+
+static bool SendPingMessage(int sock, int timer_fd, struct Context* context) {
+  uint64_t expirations;
+  if (read(timer_fd, &expirations, sizeof(expirations)) !=
+      sizeof(expirations)) {
+    LOG("Failed to read timer expirations (%s)", strerror(errno));
+    return false;
+  }
+
+  struct {
+    uint32_t type;
+    uint64_t timestamp;
+  } __attribute__((packed)) ping = {
+      .type = ~0u,
+      .timestamp = MicrosNow(),
+  };
+
+  if (write(sock, &ping, sizeof(ping)) != sizeof(ping)) {
+    LOG("Failed to write ping message (%s)", strerror(errno));
+    return false;
+  }
+  return true;
 }
 
 static void ContextDestroy(struct Context* context) {
@@ -319,23 +359,38 @@ int main(int argc, char* argv[]) {
     LOG("Failed to get events fd");
     goto rollback_context;
   }
+  int timer_fd = timerfd_create(CLOCK_MONOTONIC, 0);
+  if (timer_fd == -1) {
+    LOG("Failed to create timer (%s)", strerror(errno));
+    goto rollback_context;
+  }
 
+  static const unsigned ping_period_ns = 1000 * 1000 * 1000 / 3;
+  static const struct itimerspec spec = {
+      .it_interval.tv_nsec = ping_period_ns,
+      .it_value.tv_nsec = ping_period_ns,
+  };
+  if (timerfd_settime(timer_fd, 0, &spec, NULL)) {
+    LOG("Failed to arm timer (%s)", strerror(errno));
+    goto rollback_timer_fd;
+  }
   if (signal(SIGINT, OnSignal) == SIG_ERR ||
       signal(SIGTERM, OnSignal) == SIG_ERR) {
     LOG("Failed to set signal handlers (%s)", strerror(errno));
-    return EXIT_FAILURE;
+    goto rollback_timer_fd;
   }
 
   while (!g_signal) {
     struct pollfd pfds[] = {
         {.fd = sock, .events = POLLIN},
         {.fd = events_fd, .events = POLLIN},
+        {.fd = timer_fd, .events = POLLIN},
     };
     switch (poll(pfds, LENGTH(pfds), -1)) {
       case -1:
         if (errno != EINTR) {
           LOG("Failed to poll (%s)", strerror(errno));
-          goto rollback_context;
+          goto rollback_timer_fd;
         }
         __attribute__((fallthrough));
       case 0:
@@ -345,14 +400,20 @@ int main(int argc, char* argv[]) {
     }
     if (pfds[0].revents && !DemuxProtoStream(sock, context)) {
       LOG("Failed to demux proto stream");
-      goto rollback_context;
+      goto rollback_timer_fd;
     }
     if (pfds[1].revents && !WindowProcessEvents(context->window)) {
       LOG("Failed to process window events");
-      goto rollback_context;
+      goto rollback_timer_fd;
+    }
+    if (pfds[2].revents && !SendPingMessage(sock, timer_fd, context)) {
+      LOG("Failed to send ping message");
+      goto rollback_timer_fd;
     }
   }
 
+rollback_timer_fd:
+  close(timer_fd);
 rollback_context:
   ContextDestroy(context);
 rollback_socket:
