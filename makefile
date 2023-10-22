@@ -19,6 +19,7 @@ protocols_dir:=\
 	/usr/share/wayland-protocols
 
 protocols:=\
+	viewporter \
 	linux-dmabuf-unstable-v1 \
 	pointer-constraints-unstable-v1 \
 	relative-pointer-unstable-v1 \

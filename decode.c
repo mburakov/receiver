@@ -462,7 +462,9 @@ bool DecodeContextDecode(struct DecodeContext* decode_context,
     }
 
     size_t locked = UnlockAllSurfaces(decode_context, surface_out->Data.MemId);
-    if (!WindowShowFrame(decode_context->window, locked)) {
+    if (!WindowShowFrame(decode_context->window, locked,
+                         surface_out->Info.CropX, surface_out->Info.CropY,
+                         surface_out->Info.CropW, surface_out->Info.CropH)) {
       LOG("Failed to show frame");
       return false;
     }

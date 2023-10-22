@@ -34,6 +34,7 @@
 #include "pointer-constraints-unstable-v1.h"
 #include "relative-pointer-unstable-v1.h"
 #include "toolbox/utils.h"
+#include "viewporter.h"
 #include "xdg-shell.h"
 
 #define OVERLAY_BUFFERS_COUNT 2
@@ -52,6 +53,7 @@ struct Window {
   struct wl_shm* wl_shm;
   struct wl_seat* wl_seat;
   struct wl_subcompositor* wl_subcompositor;
+  struct wp_viewporter* wp_viewporter;
   struct xdg_wm_base* xdg_wm_base;
   struct zwp_linux_dmabuf_v1* zwp_linux_dmabuf_v1;
   struct zwp_pointer_constraints_v1* zwp_pointer_constraints_v1;
@@ -59,6 +61,7 @@ struct Window {
 
   // Wayland toplevel
   struct wl_surface* wl_surface;
+  struct wp_viewport* wp_viewport;
   struct xdg_surface* xdg_surface;
   struct xdg_toplevel* xdg_toplevel;
 
@@ -71,6 +74,8 @@ struct Window {
   // Wayland dynamics
   size_t wl_buffers_count;
   struct wl_buffer** wl_buffers;
+  int32_t window_width;
+  int32_t window_height;
   bool was_closed;
 };
 
@@ -101,6 +106,7 @@ static void OnWlRegistryGlobal(void* data, struct wl_registry* wl_registry,
   MAYBE_BIND(wl_shm)
   MAYBE_BIND(wl_seat)
   MAYBE_BIND(wl_subcompositor)
+  MAYBE_BIND(wp_viewporter)
   MAYBE_BIND(xdg_wm_base)
   MAYBE_BIND(zwp_linux_dmabuf_v1)
   MAYBE_BIND(zwp_pointer_constraints_v1)
@@ -148,8 +154,10 @@ static bool InitWaylandGlobals(struct Window* window) {
     goto rollback_wl_registry;
   }
 
-  if (!window->wl_compositor || !window->wl_seat || !window->xdg_wm_base ||
-      !window->zwp_linux_dmabuf_v1 || !window->zwp_pointer_constraints_v1 ||
+  if (!window->wl_compositor || !window->wl_shm || !window->wl_seat ||
+      !window->wl_subcompositor || !window->wp_viewporter ||
+      !window->xdg_wm_base || !window->zwp_linux_dmabuf_v1 ||
+      !window->zwp_pointer_constraints_v1 ||
       !window->zwp_relative_pointer_manager_v1) {
     LOG("Some required wayland globals are missing");
     goto rollback_globals;
@@ -173,6 +181,7 @@ rollback_globals:
   if (window->zwp_linux_dmabuf_v1)
     zwp_linux_dmabuf_v1_destroy(window->zwp_linux_dmabuf_v1);
   if (window->xdg_wm_base) xdg_wm_base_destroy(window->xdg_wm_base);
+  if (window->wp_viewporter) wp_viewporter_destroy(window->wp_viewporter);
   if (window->wl_subcompositor)
     wl_subcompositor_destroy(window->wl_subcompositor);
   if (window->wl_seat) wl_seat_destroy(window->wl_seat);
@@ -195,11 +204,13 @@ static void OnXdgToplevelConfigure(void* data,
                                    struct xdg_toplevel* xdg_toplevel,
                                    int32_t width, int32_t height,
                                    struct wl_array* states) {
-  (void)data;
   (void)xdg_toplevel;
-  (void)width;
-  (void)height;
   (void)states;
+  struct Window* window = data;
+  if (width && height) {
+    window->window_width = width;
+    window->window_height = height;
+  }
 }
 
 static void OnXdgToplevelClose(void* data, struct xdg_toplevel* xdg_toplevel) {
@@ -236,11 +247,18 @@ static bool InitWaylandToplevel(struct Window* window) {
     return false;
   }
 
+  window->wp_viewport =
+      wp_viewporter_get_viewport(window->wp_viewporter, window->wl_surface);
+  if (!window->wp_viewport) {
+    LOG("Failed to get wp_viewport (%s)", strerror(errno));
+    goto rollback_wl_surface;
+  }
+
   window->xdg_surface =
       xdg_wm_base_get_xdg_surface(window->xdg_wm_base, window->wl_surface);
   if (!window->xdg_surface) {
     LOG("Failed to get xdg_surface (%s)", strerror(errno));
-    goto rollback_wl_surface;
+    goto rollback_wp_viewport;
   }
 
   static const struct xdg_surface_listener xdg_surface_listener = {
@@ -274,6 +292,8 @@ rollback_xdg_toplevel:
   xdg_toplevel_destroy(window->xdg_toplevel);
 rollback_xdg_surface:
   xdg_surface_destroy(window->xdg_surface);
+rollback_wp_viewport:
+  wp_viewport_destroy(window->wp_viewport);
 rollback_wl_surface:
   wl_surface_destroy(window->wl_surface);
   return false;
@@ -533,6 +553,7 @@ static void DeinitWaylandInputs(struct Window* window) {
 static void DeinitWaylandToplevel(struct Window* window) {
   xdg_toplevel_destroy(window->xdg_toplevel);
   xdg_surface_destroy(window->xdg_surface);
+  wp_viewport_destroy(window->wp_viewport);
   wl_surface_destroy(window->wl_surface);
 }
 
@@ -542,6 +563,7 @@ static void DeinitWaylandGlobals(struct Window* window) {
   zwp_pointer_constraints_v1_destroy(window->zwp_pointer_constraints_v1);
   zwp_linux_dmabuf_v1_destroy(window->zwp_linux_dmabuf_v1);
   xdg_wm_base_destroy(window->xdg_wm_base);
+  wp_viewporter_destroy(window->wp_viewporter);
   wl_subcompositor_destroy(window->wl_subcompositor);
   wl_seat_destroy(window->wl_seat);
   wl_shm_destroy(window->wl_shm);
@@ -662,7 +684,15 @@ rollback_buffers:
   return false;
 }
 
-bool WindowShowFrame(struct Window* window, size_t index) {
+bool WindowShowFrame(struct Window* window, size_t index, int x, int y,
+                     int width, int height) {
+  wp_viewport_set_source(window->wp_viewport, wl_fixed_from_int(x),
+                         wl_fixed_from_int(y), wl_fixed_from_int(width),
+                         wl_fixed_from_int(height));
+  if (window->window_width && window->window_height) {
+    wp_viewport_set_destination(window->wp_viewport, window->window_width,
+                                window->window_height);
+  }
   wl_surface_attach(window->wl_surface, window->wl_buffers[index], 0, 0);
   wl_surface_damage(window->wl_surface, 0, 0, INT32_MAX, INT32_MAX);
   wl_surface_commit(window->wl_surface);

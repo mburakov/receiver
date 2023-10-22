@@ -40,7 +40,8 @@ int WindowGetEventsFd(const struct Window* window);
 bool WindowProcessEvents(const struct Window* window);
 bool WindowAssignFrames(struct Window* window, size_t nframes,
                         const struct Frame* frames);
-bool WindowShowFrame(struct Window* window, size_t index);
+bool WindowShowFrame(struct Window* window, size_t index, int x, int y,
+                     int width, int height);
 void WindowDestroy(struct Window* window);
 
 struct Overlay* OverlayCreate(const struct Window* window, int x, int y,
