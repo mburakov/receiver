@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
 
@@ -54,11 +55,14 @@ struct Context {
   struct Buffer buffer;
 
   size_t video_bitstream;
+  size_t audio_bitstream;
   uint64_t timestamp;
   uint64_t ping_sum;
   uint64_t ping_count;
-  uint64_t latency_sum;
-  uint64_t latency_count;
+  uint64_t video_latency_sum;
+  uint64_t video_latency_count;
+  uint64_t audio_latency_sum;
+  uint64_t audio_latency_count;
 };
 
 static int ConnectSocket(const char* arg) {
@@ -139,9 +143,9 @@ static void OnWindowWheel(void* user, int delta) {
 
 static void GetMaxOverlaySize(size_t* width, size_t* height) {
   char str[64];
-  snprintf(str, sizeof(str), "Bitrate: %zu.000 Mbps", SIZE_MAX / 1000);
+  snprintf(str, sizeof(str), "Video bitstream: %zu.000 Mbps", SIZE_MAX / 1000);
   *width = 4 + PuiStringWidth(str) + 4;
-  *height = 4 + 12 * 3 + 4;
+  *height = 4 + 12 * 5 + 4;
 }
 
 static struct Context* ContextCreate(int sock, bool no_input, bool stats,
@@ -223,12 +227,6 @@ static bool RenderOverlay(struct Context* context, uint64_t timestamp) {
     return false;
   }
 
-  char bitrate_str[64];
-  uint64_t clock_delta = timestamp - context->timestamp;
-  size_t bitrate = context->video_bitstream * 1000000 * 8 / clock_delta / 1024;
-  snprintf(bitrate_str, sizeof(bitrate_str), "Bitrate: %zu.%03zu Mbps",
-           bitrate / 1000, bitrate % 1000);
-
   char ping_str[64];
   uint64_t ping = 0;
   if (context->ping_count) {
@@ -237,32 +235,85 @@ static bool RenderOverlay(struct Context* context, uint64_t timestamp) {
   snprintf(ping_str, sizeof(ping_str), "Ping: %zu.%03zu ms", ping / 1000,
            ping % 1000);
 
-  char latency_str[64];
-  uint64_t latency = 0;
-  if (context->latency_count) {
+  char video_bitrate_str[64];
+  uint64_t clock_delta = timestamp - context->timestamp;
+  // mburakov: Kbps = nbytes * 1sec * 8bit / clock_delta / 1024
+  size_t video_bitrate =
+      context->video_bitstream * 1000000 * 8 / clock_delta / 1024;
+  snprintf(video_bitrate_str, sizeof(video_bitrate_str),
+           "Video bitrate: %zu.%03zu Mbps", video_bitrate / 1000,
+           video_bitrate % 1000);
+
+  char audio_bitrate_str[64];
+  size_t audio_bitrate = 0;
+  if (context->audio_context) {
+    // mburakov: Kbps = nbytes * 1sec * 8bit / clock_delta / 1024
+    audio_bitrate = context->audio_bitstream * 1000000 * 8 / clock_delta / 1024;
+    snprintf(audio_bitrate_str, sizeof(audio_bitrate_str),
+             "Audio bitrate: %zu.%03zu Mbps", audio_bitrate / 1000,
+             audio_bitrate % 1000);
+  }
+
+  char video_latency_str[64];
+  uint64_t video_latency = 0;
+  if (context->video_latency_count) {
     // mburakov: Pessimistic calculations, these assume one fully missed vsync
     // for capture, one fully missed vsync for rendering, and 100Mbit network.
-    latency = context->latency_sum / context->latency_count + ping + 16666 +
-              16666 + bitrate * 1000000 / 100000000 / context->latency_count;
+    // latency = avg_latency + ping + vsync + vsync + Kbps * 1sec / 100Mbps
+    video_latency =
+        context->video_latency_sum / context->video_latency_count + ping +
+        16666 + 16666 +
+        video_bitrate * 1000000 / 100000000 / context->video_latency_count;
   }
-  snprintf(latency_str, sizeof(latency_str), "Latency: %zu.%03zu ms",
-           latency / 1000, latency % 1000);
+  snprintf(video_latency_str, sizeof(video_latency_str),
+           "Video latency: %zu.%03zu ms", video_latency / 1000,
+           video_latency % 1000);
 
-  size_t overlay_width =
-      MAX(PuiStringWidth(bitrate_str), PuiStringWidth(ping_str));
-  overlay_width = MAX(overlay_width, PuiStringWidth(latency_str)) + 8;
+  char audio_latency_str[64];
+  if (context->audio_context) {
+    uint64_t audio_latency = 0;
+    if (context->audio_latency_count) {
+      // mburakov: Pessimistic calculations, assume 100Mbit network. Capture
+      // and playback periods are unknown, but should roughly correspond to the
+      // latency reported by the audio context, because it commulatively
+      // includes all the missed periods since the beginning of streming.
+      // latency = avg_latency + ping + Kbps * 1sec / 100Mbps + context_latency
+      audio_latency =
+          context->audio_latency_sum / context->audio_latency_count + ping +
+          audio_bitrate * 1000000 / 100000000 +
+          AudioContextGetLatency(context->audio_context);
+    }
+    snprintf(audio_latency_str, sizeof(audio_latency_str),
+             "Audio latency: %zu.%03zu ms", audio_latency / 1000,
+             audio_latency % 1000);
+  }
+
+  char* lines[5] = {NULL};
+  char** plines = lines;
+  *plines++ = ping_str;
+  *plines++ = video_bitrate_str;
+  if (context->audio_context) *plines++ = audio_bitrate_str;
+  *plines++ = video_latency_str;
+  if (context->audio_context) *plines++ = audio_latency_str;
+  size_t nlines = (size_t)(plines - lines);
+
+  size_t overlay_width = 0;
+  for (size_t i = 0; i < nlines; i++)
+    overlay_width = MAX(overlay_width, PuiStringWidth(lines[i]));
+  overlay_width += 8;
+  size_t overlay_height = 12 * nlines + 8;
+
   memset(buffer, 0, context->overlay_width * context->overlay_height * 4);
-  for (size_t y = 0; y < context->overlay_height; y++) {
+  for (size_t y = 0; y < overlay_height; y++) {
     for (size_t x = 0; x < overlay_width; x++)
       buffer[x + y * context->overlay_width] = 0x40000000;
   }
 
-  PuiStringRender(bitrate_str, buffer + context->overlay_width * 4 + 4,
-                  context->overlay_width, 0xffffffff);
-  PuiStringRender(ping_str, buffer + context->overlay_width * 16 + 4,
-                  context->overlay_width, 0xffffffff);
-  PuiStringRender(latency_str, buffer + context->overlay_width * 28 + 4,
-                  context->overlay_width, 0xffffffff);
+  for (size_t i = 0; i < nlines; i++) {
+    size_t voffset = context->overlay_width * (4 + 12 * i);
+    PuiStringRender(lines[i], buffer + voffset + 4, context->overlay_width,
+                    0xffffffff);
+  }
   OverlayUnlock(context->overlay);
   return true;
 }
@@ -281,19 +332,22 @@ static bool HandleVideoStream(struct Context* context) {
   }
 
   context->video_bitstream += proto->size;
-  context->latency_sum += proto->latency;
-  context->latency_count++;
+  context->video_latency_sum += proto->latency;
+  context->video_latency_count++;
 
   if (!(proto->flags & PROTO_FLAG_KEYFRAME)) return true;
 
   uint64_t timestamp = MicrosNow();
   if (!RenderOverlay(context, timestamp)) LOG("Failed to render overlay");
   context->video_bitstream = 0;
+  context->audio_bitstream = 0;
   context->timestamp = timestamp;
   context->ping_sum = 0;
   context->ping_count = 0;
-  context->latency_sum = 0;
-  context->latency_count = 0;
+  context->video_latency_sum = 0;
+  context->video_latency_count = 0;
+  context->audio_latency_sum = 0;
+  context->audio_latency_count = 0;
   return true;
 }
 
@@ -305,6 +359,15 @@ static bool HandleAudioStream(struct Context* context) {
     return false;
   }
 
+  if (!context->overlay) return true;
+  if (!context->timestamp) {
+    context->timestamp = MicrosNow();
+    return true;
+  }
+
+  context->audio_bitstream += proto->size;
+  context->audio_latency_sum += proto->latency;
+  context->audio_latency_count++;
   return true;
 }
 

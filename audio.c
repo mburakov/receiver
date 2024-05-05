@@ -32,6 +32,7 @@ struct AudioContext {
   const char* device;
   atomic_bool running;
   struct AtomicQueue queue;
+  atomic_uint_fast64_t latency;
   thrd_t thread;
 };
 
@@ -64,6 +65,9 @@ static int AudioContextThreadProc(void* arg) {
     if (size < sizeof(buffer)) {
       // LOG("Audio queue underflow!");
       memset(buffer + size, 0, sizeof(buffer) - size);
+      uint64_t micros = (sizeof(buffer) - size) * 1000 / frame_size / 48;
+      atomic_fetch_add_explicit(&context->latency, micros,
+                                memory_order_relaxed);
     }
 
     for (snd_pcm_uframes_t offset = 0; offset < sizeof(buffer) / frame_size;) {
@@ -121,6 +125,10 @@ bool AudioContextDecode(struct AudioContext* audio_context, const void* buffer,
   if (AtomicQueueWrite(&audio_context->queue, buffer, size) < size)
     LOG("Audio queue overflow!");
   return true;
+}
+
+uint64_t AudioContextGetLatency(const struct AudioContext* audio_context) {
+  return atomic_load_explicit(&audio_context->latency, memory_order_relaxed);
 }
 
 void AudioContextDestroy(struct AudioContext* audio_context) {

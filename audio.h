@@ -20,12 +20,14 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 struct AudioContext;
 
 struct AudioContext* AudioContextCreate(const char* device);
 bool AudioContextDecode(struct AudioContext* audio_context, const void* buffer,
                         size_t size);
+uint64_t AudioContextGetLatency(const struct AudioContext* audio_context);
 void AudioContextDestroy(struct AudioContext* audio_context);
 
 #endif  // RECEIVER_AUDIO_H_
