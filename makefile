@@ -10,6 +10,7 @@ obj+=\
 	toolbox/perf.o
 
 libs:=\
+	alsa \
 	libva \
 	libva-drm \
 	mfx \

@@ -30,6 +30,7 @@
 #include <sys/timerfd.h>
 #include <unistd.h>
 
+#include "audio.h"
 #include "decode.h"
 #include "input.h"
 #include "proto.h"
@@ -49,6 +50,7 @@ struct Context {
   size_t overlay_height;
   struct Overlay* overlay;
   struct DecodeContext* decode_context;
+  struct AudioContext* audio_context;
   struct Buffer buffer;
 
   size_t video_bitstream;
@@ -142,7 +144,8 @@ static void GetMaxOverlaySize(size_t* width, size_t* height) {
   *height = 4 + 12 * 3 + 4;
 }
 
-static struct Context* ContextCreate(int sock, bool no_input, bool stats) {
+static struct Context* ContextCreate(int sock, bool no_input, bool stats,
+                                     const char* audio_device) {
   struct Context* context = calloc(1, sizeof(struct Context));
   if (!context) {
     LOG("Failed to allocate context (%s)", strerror(errno));
@@ -190,8 +193,18 @@ static struct Context* ContextCreate(int sock, bool no_input, bool stats) {
     LOG("Failed to create decode context");
     goto rollback_overlay;
   }
+
+  if (audio_device) {
+    context->audio_context = AudioContextCreate(audio_device);
+    if (!context->audio_context) {
+      LOG("Failed to create audio context");
+      goto rollback_decode_context;
+    }
+  }
   return context;
 
+rollback_decode_context:
+  DecodeContextDestroy(context->decode_context);
 rollback_overlay:
   if (context->overlay) OverlayDestroy(context->overlay);
 rollback_window:
@@ -284,6 +297,17 @@ static bool HandleVideoStream(struct Context* context) {
   return true;
 }
 
+static bool HandleAudioStream(struct Context* context) {
+  const struct Proto* proto = context->buffer.data;
+  if (!context->audio_context) return true;
+  if (!AudioContextDecode(context->audio_context, proto->data, proto->size)) {
+    LOG("Failed to decode incoming audio data");
+    return false;
+  }
+
+  return true;
+}
+
 static bool DemuxProtoStream(int sock, struct Context* context) {
   switch (BufferAppendFrom(&context->buffer, sock)) {
     case -1:
@@ -313,6 +337,11 @@ again:
         return false;
       }
       break;
+    case PROTO_TYPE_AUDIO:
+      if (!HandleAudioStream(context)) {
+        LOG("Failed to handle audio stream");
+        return false;
+      }
   }
 
   BufferDiscard(&context->buffer, sizeof(struct Proto) + proto->size);
@@ -344,6 +373,7 @@ static bool SendPingMessage(int sock, int timer_fd, struct Context* context) {
 
 static void ContextDestroy(struct Context* context) {
   BufferDestroy(&context->buffer);
+  if (context->audio_context) AudioContextDestroy(context->audio_context);
   DecodeContextDestroy(context->decode_context);
   if (context->overlay) OverlayDestroy(context->overlay);
   WindowDestroy(context->window);
@@ -352,7 +382,8 @@ static void ContextDestroy(struct Context* context) {
 
 int main(int argc, char* argv[]) {
   if (argc < 2) {
-    LOG("Usage: %s <ip>:<port> [--no-input] [--stats]", argv[0]);
+    LOG("Usage: %s <ip>:<port> [--no-input] [--stats] [--audio <device>]",
+        argv[0]);
     return EXIT_FAILURE;
   }
 
@@ -364,15 +395,22 @@ int main(int argc, char* argv[]) {
 
   bool no_input = false;
   bool stats = false;
+  const char* audio_device = NULL;
   for (int i = 2; i < argc; i++) {
     if (!strcmp(argv[i], "--no-input")) {
       no_input = true;
     } else if (!strcmp(argv[i], "--stats")) {
       stats = true;
+    } else if (!strcmp(argv[i], "--audio")) {
+      audio_device = argv[++i];
+      if (i == argc) {
+        LOG("Audio argument requires a value");
+        return EXIT_FAILURE;
+      }
     }
   }
 
-  struct Context* context = ContextCreate(sock, no_input, stats);
+  struct Context* context = ContextCreate(sock, no_input, stats, audio_device);
   if (!context) {
     LOG("Failed to create context");
     goto rollback_socket;
