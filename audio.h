@@ -24,10 +24,10 @@
 
 struct AudioContext;
 
-struct AudioContext* AudioContextCreate(const char* device);
+struct AudioContext* AudioContextCreate(size_t queue_size);
 bool AudioContextDecode(struct AudioContext* audio_context, const void* buffer,
                         size_t size);
-uint64_t AudioContextGetLatency(const struct AudioContext* audio_context);
+uint64_t AudioContextGetLatency(struct AudioContext* audio_context);
 void AudioContextDestroy(struct AudioContext* audio_context);
 
 #endif  // RECEIVER_AUDIO_H_

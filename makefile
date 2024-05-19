@@ -10,7 +10,7 @@ obj+=\
 	toolbox/perf.o
 
 libs:=\
-	alsa \
+	libpipewire-0.3 \
 	libva \
 	libva-drm \
 	mfx \

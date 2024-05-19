@@ -149,7 +149,7 @@ static void GetMaxOverlaySize(size_t* width, size_t* height) {
 }
 
 static struct Context* ContextCreate(int sock, bool no_input, bool stats,
-                                     const char* audio_device) {
+                                     const char* audio_buffer) {
   struct Context* context = calloc(1, sizeof(struct Context));
   if (!context) {
     LOG("Failed to allocate context (%s)", strerror(errno));
@@ -198,8 +198,13 @@ static struct Context* ContextCreate(int sock, bool no_input, bool stats,
     goto rollback_overlay;
   }
 
-  if (audio_device) {
-    context->audio_context = AudioContextCreate(audio_device);
+  if (audio_buffer) {
+    int buffer_size = atoi(audio_buffer);
+    if (buffer_size <= 0) {
+      LOG("Invalid audio buffer size");
+      goto rollback_decode_context;
+    }
+    context->audio_context = AudioContextCreate((size_t)buffer_size);
     if (!context->audio_context) {
       LOG("Failed to create audio context");
       goto rollback_decode_context;
@@ -445,7 +450,7 @@ static void ContextDestroy(struct Context* context) {
 
 int main(int argc, char* argv[]) {
   if (argc < 2) {
-    LOG("Usage: %s <ip>:<port> [--no-input] [--stats] [--audio <device>]",
+    LOG("Usage: %s <ip>:<port> [--no-input] [--stats] [--audio <buffer_size>]",
         argv[0]);
     return EXIT_FAILURE;
   }
@@ -458,14 +463,14 @@ int main(int argc, char* argv[]) {
 
   bool no_input = false;
   bool stats = false;
-  const char* audio_device = NULL;
+  const char* audio_buffer = NULL;
   for (int i = 2; i < argc; i++) {
     if (!strcmp(argv[i], "--no-input")) {
       no_input = true;
     } else if (!strcmp(argv[i], "--stats")) {
       stats = true;
     } else if (!strcmp(argv[i], "--audio")) {
-      audio_device = argv[++i];
+      audio_buffer = argv[++i];
       if (i == argc) {
         LOG("Audio argument requires a value");
         return EXIT_FAILURE;
@@ -473,7 +478,7 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  struct Context* context = ContextCreate(sock, no_input, stats, audio_device);
+  struct Context* context = ContextCreate(sock, no_input, stats, audio_buffer);
   if (!context) {
     LOG("Failed to create context");
     goto rollback_socket;
