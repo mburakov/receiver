@@ -29,6 +29,8 @@
 #include "toolbox/utils.h"
 
 struct AudioContext {
+  size_t sample_rate;
+  size_t audio_stride;
   struct AtomicQueue queue;
   struct pw_thread_loop* pw_thread_loop;
   struct pw_stream* pw_stream;
@@ -36,6 +38,81 @@ struct AudioContext {
   size_t queue_samples_sum;
   size_t queue_samples_count;
 };
+
+static bool LookupChannel(const char* name, uint32_t* value) {
+  struct {
+    const char* name;
+    enum spa_audio_channel value;
+  } static const kChannelMap[] = {
+#define _(op) {.name = #op, .value = SPA_AUDIO_CHANNEL_##op}
+      _(FL),  _(FR),   _(FC),   _(LFE),  _(SL),  _(SR),   _(FLC),
+      _(FRC), _(RC),   _(RL),   _(RR),   _(TC),  _(TFL),  _(TFC),
+      _(TFR), _(TRL),  _(TRC),  _(TRR),  _(RLC), _(RRC),  _(FLW),
+      _(FRW), _(LFE2), _(FLH),  _(FCH),  _(FRH), _(TFLC), _(TFRC),
+      _(TSL), _(TSR),  _(LLFE), _(RLFE), _(BC),  _(BLC),  _(BRC),
+#undef _
+  };
+  for (size_t i = 0; i < LENGTH(kChannelMap); i++) {
+    if (!strcmp(kChannelMap[i].name, name)) {
+      if (value) *value = kChannelMap[i].value;
+      return true;
+    }
+  }
+  return false;
+}
+
+static size_t ParseChannelMap(
+    const char* channel_map,
+    uint32_t channel_positions[SPA_AUDIO_MAX_CHANNELS]) {
+  char minibuf[5];
+  size_t channels_counter = 0;
+  for (size_t i = 0, j = 0;; i++) {
+    switch (channel_map[i]) {
+      case 0:
+      case ',':
+        minibuf[j] = 0;
+        if (channels_counter == SPA_AUDIO_MAX_CHANNELS ||
+            !LookupChannel(minibuf, &channel_positions[channels_counter++]))
+          return 0;
+        if (!channel_map[i]) return channels_counter;
+        j = 0;
+        break;
+      default:
+        if (j == 4) return 0;
+        minibuf[j++] = channel_map[i];
+        break;
+    }
+  }
+}
+
+static bool ParseAudioConfig(const char* audio_config,
+                             struct spa_audio_info_raw* out_audio_info) {
+  int sample_rate = atoi(audio_config);
+  if (sample_rate != 44100 && sample_rate != 48000) {
+    LOG("Invalid sample rate requested");
+    return false;
+  }
+  const char* channel_map = strchr(audio_config, ':');
+  if (!channel_map) {
+    LOG("Invalid audio config requested");
+    return false;
+  }
+
+  channel_map++;
+  struct spa_audio_info_raw audio_info = {
+      .format = SPA_AUDIO_FORMAT_S16_LE,
+      .rate = (uint32_t)sample_rate,
+  };
+  audio_info.channels =
+      (uint32_t)ParseChannelMap(channel_map, audio_info.position);
+  if (!audio_info.channels) {
+    LOG("Invalid channel map requested");
+    return false;
+  }
+
+  *out_audio_info = audio_info;
+  return true;
+}
 
 static void OnStreamProcess(void* data) {
   struct AudioContext* audio_context = data;
@@ -46,10 +123,10 @@ static void OnStreamProcess(void* data) {
     return;
   }
 
-  static const size_t stride = sizeof(int16_t) * 2;
   struct spa_data* spa_data = &pw_buffer->buffer->datas[0];
-  size_t requested =
-      MIN(pw_buffer->requested, spa_data->maxsize / stride) * stride;
+  size_t requested = MIN(pw_buffer->requested,
+                         spa_data->maxsize / audio_context->audio_stride) *
+                     audio_context->audio_stride;
   size_t available =
       AtomicQueueRead(&audio_context->queue, spa_data->data, requested);
 
@@ -59,13 +136,22 @@ static void OnStreamProcess(void* data) {
   }
 
   spa_data->chunk->offset = 0;
-  spa_data->chunk->stride = stride;
+  spa_data->chunk->stride = (int32_t)audio_context->audio_stride;
   spa_data->chunk->size = (uint32_t)requested;
   pw_stream_queue_buffer(audio_context->pw_stream, pw_buffer);
   return;
 }
 
-struct AudioContext* AudioContextCreate(size_t queue_size) {
+struct AudioContext* AudioContextCreate(size_t queue_size,
+                                        const char* audio_config) {
+  LOG("Audio config is \"%s\"", audio_config);
+
+  struct spa_audio_info_raw audio_info;
+  if (!ParseAudioConfig(audio_config, &audio_info)) {
+    LOG("Failed to parse audio config argument");
+    return NULL;
+  }
+
   pw_init(0, NULL);
   struct AudioContext* audio_context = malloc(sizeof(struct AudioContext));
   if (!audio_context) {
@@ -73,8 +159,10 @@ struct AudioContext* AudioContextCreate(size_t queue_size) {
     return NULL;
   }
 
+  audio_context->sample_rate = audio_info.rate;
+  audio_context->audio_stride = audio_info.channels * sizeof(int16_t);
   if (!AtomicQueueCreate(&audio_context->queue,
-                         queue_size * sizeof(int16_t) * 2)) {
+                         queue_size * audio_context->audio_stride)) {
     LOG("Failed to create buffer queue (%s)", strerror(errno));
     goto rollback_audio_context;
   }
@@ -93,11 +181,10 @@ struct AudioContext* AudioContextCreate(size_t queue_size) {
     goto rollback_thread_loop;
   }
 
-  // TOOD(mburakov): Read these from the commandline?
   struct pw_properties* pw_properties = pw_properties_new(
 #define _(...) __VA_ARGS__
       _(PW_KEY_MEDIA_TYPE, "Audio"), _(PW_KEY_MEDIA_CATEGORY, "Playback"),
-      _(PW_KEY_MEDIA_ROLE, "Game"), _(PW_KEY_NODE_LATENCY, "128/48000"), NULL
+      _(PW_KEY_MEDIA_ROLE, "Game"), NULL
 #undef _
   );
   if (!pw_properties) {
@@ -106,6 +193,8 @@ struct AudioContext* AudioContextCreate(size_t queue_size) {
     goto rollback_thread_loop;
   }
 
+  pw_properties_setf(pw_properties, PW_KEY_NODE_LATENCY, "128/%du",
+                     audio_info.rate);
   static const struct pw_stream_events kPwStreamEvents = {
       .version = PW_VERSION_STREAM_EVENTS,
       .process = OnStreamProcess,
@@ -122,14 +211,8 @@ struct AudioContext* AudioContextCreate(size_t queue_size) {
   uint8_t buffer[1024];
   struct spa_pod_builder spa_pod_builder =
       SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-  const struct spa_pod* params[] = {
-      spa_format_audio_raw_build(
-          &spa_pod_builder, SPA_PARAM_EnumFormat,
-          &SPA_AUDIO_INFO_RAW_INIT(.format = SPA_AUDIO_FORMAT_S16_LE,
-                                   .rate = 48000, .channels = 2,
-                                   .position = {SPA_AUDIO_CHANNEL_FL,
-                                                SPA_AUDIO_CHANNEL_FR})),
-  };
+  const struct spa_pod* params[] = {spa_format_audio_raw_build(
+      &spa_pod_builder, SPA_PARAM_EnumFormat, &audio_info)};
   static const enum pw_stream_flags kPwStreamFlags =
       PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS |
       PW_STREAM_FLAG_RT_PROCESS;
@@ -162,8 +245,7 @@ bool AudioContextDecode(struct AudioContext* audio_context, const void* buffer,
     LOG("Audio queue overflow!");
   size_t queue_size =
       atomic_load_explicit(&audio_context->queue.size, memory_order_relaxed);
-  static const size_t stride = sizeof(int16_t) * 2;
-  audio_context->queue_samples_sum += queue_size / stride;
+  audio_context->queue_samples_sum += queue_size / audio_context->audio_stride;
   audio_context->queue_samples_count++;
   return true;
 }
@@ -178,7 +260,7 @@ uint64_t AudioContextGetLatency(struct AudioContext* audio_context) {
   }
   // TODO(mburakov): This number is extremely optimistic, i.e. Bluetooth delays
   // are not accounted for. Is it anyhow possible to get this information?
-  return (128 + queue_latency) * 1000000 / 48000;
+  return (128 + queue_latency) * 1000000 / audio_context->sample_rate;
 }
 
 void AudioContextDestroy(struct AudioContext* audio_context) {

@@ -24,7 +24,8 @@
 
 struct AudioContext;
 
-struct AudioContext* AudioContextCreate(size_t queue_size);
+struct AudioContext* AudioContextCreate(size_t queue_size,
+                                        const char* audio_config);
 bool AudioContextDecode(struct AudioContext* audio_context, const void* buffer,
                         size_t size);
 uint64_t AudioContextGetLatency(struct AudioContext* audio_context);

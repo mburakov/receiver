@@ -45,6 +45,7 @@ static volatile sig_atomic_t g_signal;
 static void OnSignal(int status) { g_signal = status; }
 
 struct Context {
+  size_t audio_buffer_size;
   struct InputStream* input_stream;
   struct Window* window;
   size_t overlay_width;
@@ -150,12 +151,22 @@ static void GetMaxOverlaySize(size_t* width, size_t* height) {
 
 static struct Context* ContextCreate(int sock, bool no_input, bool stats,
                                      const char* audio_buffer) {
+  int audio_buffer_size = 0;
+  if (audio_buffer) {
+    audio_buffer_size = atoi(audio_buffer);
+    if (audio_buffer_size <= 0) {
+      LOG("Invalid audio buffer size");
+      return NULL;
+    }
+  }
+
   struct Context* context = calloc(1, sizeof(struct Context));
   if (!context) {
     LOG("Failed to allocate context (%s)", strerror(errno));
     return NULL;
   }
 
+  context->audio_buffer_size = (size_t)audio_buffer_size;
   const struct WindowEventHandlers* maybe_window_event_handlers = NULL;
   if (!no_input) {
     context->input_stream = InputStreamCreate(sock);
@@ -197,23 +208,8 @@ static struct Context* ContextCreate(int sock, bool no_input, bool stats,
     LOG("Failed to create decode context");
     goto rollback_overlay;
   }
-
-  if (audio_buffer) {
-    int buffer_size = atoi(audio_buffer);
-    if (buffer_size <= 0) {
-      LOG("Invalid audio buffer size");
-      goto rollback_decode_context;
-    }
-    context->audio_context = AudioContextCreate((size_t)buffer_size);
-    if (!context->audio_context) {
-      LOG("Failed to create audio context");
-      goto rollback_decode_context;
-    }
-  }
   return context;
 
-rollback_decode_context:
-  DecodeContextDestroy(context->decode_context);
 rollback_overlay:
   if (context->overlay) OverlayDestroy(context->overlay);
 rollback_window:
@@ -358,6 +354,16 @@ static bool HandleVideoStream(struct Context* context) {
 
 static bool HandleAudioStream(struct Context* context) {
   const struct Proto* proto = context->buffer.data;
+
+  if (proto->flags & PROTO_FLAG_KEYFRAME) {
+    // TODO(mburakov): Dynamic reconfiguration is unsupported.
+    if (context->audio_context || !context->audio_buffer_size) return true;
+    context->audio_context = AudioContextCreate(context->audio_buffer_size,
+                                                (const char*)proto->data);
+    if (!context->audio_context) LOG("Failed to create audio context");
+    return !!context->audio_context;
+  }
+
   if (!context->audio_context) return true;
   if (!AudioContextDecode(context->audio_context, proto->data, proto->size)) {
     LOG("Failed to decode incoming audio data");
