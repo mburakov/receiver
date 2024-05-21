@@ -2,9 +2,12 @@
 
 This is a lightweight streaming client that works together with [streamer](https://burakov.eu/streamer.git) server. It receives encoded HEVC bitstream over tcp connection, decodes it using Intel Media SDK, and renders the resulting buffers using Wayland. Everything is done hardware-accelerated and zero-copy. Receiver listens for input events from a Wayland compositor, converts those to UHID messages, and sends those to streamer server over the same tcp connection.
 
+Receiver can also receive an audio stream captured by the streamer, if the latter is built with pipewire support. Audio is streamed uncompressed to improve the latency.
+
 ## Building on Linux
 
 Receiver depends on following libraries:
+* libpipewire-0.3
 * libva
 * libva-drm
 * mfx
@@ -34,6 +37,16 @@ Provide ip address and port number of listening [streamer](https://burakov/strea
 ./receiver 192.168.8.5:1337
 ```
 
+Basic stats reporting is available in the receiver. It should be taken with a grain of salt tho. Receiver is unaware of the exact networking configuration, and some values are implied. I.e. for the video latency, 100MBit networking speed is used in calculations. As for the audio latency, it does not account for the latency of the actual output device, i.e. for Bluetooth headsets the latency could be 100-150ms higher than the reported one. To activate stats overlay nonetheless, add the corresponding commandline option:
+```
+./receiver 192.168.8.5:1337 --stats
+```
+
+If you want to receive an audio stream, and streamer is built and run with the respective options, provide the audio rinbuffer size in samples on the commandline. I.e. 100ms buffer looks like a good starting point, so for 48000 sample rate you can use following commandline (4800 samples is 100ms for 48000 sample rate):
+```
+./receiver 192.168.8.5:1337 --stats --audio 4800
+```
+
 ## What about Steam Link?
 
 For a long time I was suffering from various issues with Steam Link:
@@ -54,13 +67,9 @@ I tried this one too. Issues there are not as severe as with Steam Link, but sti
 * extremely thin Moonlight video-related configuration options are seem to be ignored entirely by Sunshine,
 * Sunshine crashed on me when I attempted to stream a game running with Proton.
 
-## But there's no audio
-
-This is correct, audio streaming is not supported as of today. Actually pulseaudio has quite a decent implementation of forwarding audio streams over network. When using module-native-protocol-tcp combined with module-tunnel-sink I only get minor distortions when connecting bluetooth headset. Connecting wired headphones produces seamless experience. That said, I might consider adding audio streaming support to the project.
-
 ## Fancy features support status
 
-There are no fancy features in streamer. There's no bitrate control - VA-API configuration selects constant image quality over constant bitrate. There's no frame pacing - because I personally consider it useless for low-latency realtime streaming. There's no network discovery. There's no automatic reconnection. There's no codec selection. There's no fancy configuration interface. There are no options at all. I might consider implementing some of that in the future - or might not, because it works perfectly fine for my use-case in its current state.
+There are no fancy features in streamer. There's no bitrate control - VA-API configuration selects constant image quality over constant bitrate. There's no frame pacing - because I personally consider it useless for low-latency realtime streaming. There's no network discovery. There's no automatic reconnection. There's no codec selection. There's no fancy configuration interface. I might consider implementing some of that in the future - or might not, because it works perfectly fine for my use-case in its current state.
 
 At the same time, it addresses all of the issues listed above for Steam Link and Sunshine/Moonlight. No issues with controls, no issue with video quality, no issues with screen capturing. On top of that instant startup and shutdown both on server- and client-side.
 
