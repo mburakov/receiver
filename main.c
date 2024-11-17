@@ -150,7 +150,8 @@ static void GetMaxOverlaySize(size_t* width, size_t* height) {
 }
 
 static struct Context* ContextCreate(int sock, bool no_input, bool stats,
-                                     const char* audio_buffer) {
+                                     const char* audio_buffer,
+                                     const char* dump_fname) {
   int audio_buffer_size = 0;
   if (audio_buffer) {
     audio_buffer_size = atoi(audio_buffer);
@@ -203,7 +204,7 @@ static struct Context* ContextCreate(int sock, bool no_input, bool stats,
     }
   }
 
-  context->decode_context = DecodeContextCreate(context->window);
+  context->decode_context = DecodeContextCreate(context->window, dump_fname);
   if (!context->decode_context) {
     LOG("Failed to create decode context");
     goto rollback_overlay;
@@ -456,7 +457,8 @@ static void ContextDestroy(struct Context* context) {
 
 int main(int argc, char* argv[]) {
   if (argc < 2) {
-    LOG("Usage: %s <ip>:<port> [--no-input] [--stats] [--audio <buffer_size>]",
+    LOG("Usage: %s <ip>:<port> [--no-input] [--stats] "
+        "[--audio <buffer_size>] [--dump-video <file_name>]",
         argv[0]);
     return EXIT_FAILURE;
   }
@@ -470,6 +472,7 @@ int main(int argc, char* argv[]) {
   bool no_input = false;
   bool stats = false;
   const char* audio_buffer = NULL;
+  const char* dump_fname = NULL;
   for (int i = 2; i < argc; i++) {
     if (!strcmp(argv[i], "--no-input")) {
       no_input = true;
@@ -481,10 +484,17 @@ int main(int argc, char* argv[]) {
         LOG("Audio argument requires a value");
         return EXIT_FAILURE;
       }
+    } else if (!strcmp(argv[i], "--dump-video")) {
+      dump_fname = argv[++i];
+      if (i == argc) {
+        LOG("Dump video argument requires a value");
+        return EXIT_FAILURE;
+      }
     }
   }
 
-  struct Context* context = ContextCreate(sock, no_input, stats, audio_buffer);
+  struct Context* context =
+      ContextCreate(sock, no_input, stats, audio_buffer, dump_fname);
   if (!context) {
     LOG("Failed to create context");
     goto rollback_socket;

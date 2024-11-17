@@ -24,7 +24,8 @@
 struct DecodeContext;
 struct Window;
 
-struct DecodeContext* DecodeContextCreate(struct Window* window);
+struct DecodeContext* DecodeContextCreate(struct Window* window,
+                                          const char* dump_fname);
 bool DecodeContextDecode(struct DecodeContext* decode_context,
                          const void* buffer, size_t size);
 void DecodeContextDestroy(struct DecodeContext* decode_context);

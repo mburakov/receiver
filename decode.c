@@ -43,6 +43,7 @@ struct Surface {
 struct DecodeContext {
   struct Window* window;
   mfxFrameAllocator allocator;
+  int dump_fd;
 
   int drm_fd;
   VADisplay va_display;
@@ -285,7 +286,8 @@ static const char* MfxStatusString(mfxStatus status) {
              : "???";
 }
 
-struct DecodeContext* DecodeContextCreate(struct Window* window) {
+struct DecodeContext* DecodeContextCreate(struct Window* window,
+                                          const char* dump_fname) {
   struct DecodeContext* decode_context = malloc(sizeof(struct DecodeContext));
   if (!decode_context) {
     LOG("Failed to allocate decode context (%s)", strerror(errno));
@@ -297,12 +299,22 @@ struct DecodeContext* DecodeContextCreate(struct Window* window) {
       .allocator.Alloc = OnAllocatorAlloc,
       .allocator.GetHDL = OnAllocatorGetHDL,
       .allocator.Free = OnAllocatorFree,
+      .dump_fd = -1,
   };
+
+  if (dump_fname) {
+    decode_context->dump_fd =
+        open(dump_fname, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+    if (decode_context->dump_fd == -1) {
+      LOG("Failed to open video dump file (%s)", strerror(errno));
+      goto rollback_decode_context;
+    }
+  }
 
   decode_context->drm_fd = open("/dev/dri/renderD128", O_RDWR);
   if (decode_context->drm_fd == -1) {
     LOG("Failed to open render node (%s)", strerror(errno));
-    goto rollback_decode_context;
+    goto rollback_dump_fd;
   }
 
   decode_context->va_display = vaGetDisplayDRM(decode_context->drm_fd);
@@ -345,6 +357,8 @@ rollback_display:
   vaTerminate(decode_context->va_display);
 rollback_drm_fd:
   close(decode_context->drm_fd);
+rollback_dump_fd:
+  if (decode_context->dump_fd != -1) close(decode_context->dump_fd);
 rollback_decode_context:
   free(decode_context);
   return NULL;
@@ -387,8 +401,7 @@ static bool InitializeDecoder(struct DecodeContext* decode_context,
 
 static struct Surface* GetFreeSurface(struct DecodeContext* decode_context) {
   struct Surface** psurface = decode_context->surfaces;
-  for (; *psurface && (*psurface)->locked; psurface++)
-    ;
+  for (; *psurface && (*psurface)->locked; psurface++);
   (*psurface)->locked = true;
   return *psurface;
 }
@@ -408,6 +421,13 @@ static size_t UnlockAllSurfaces(struct DecodeContext* decode_context,
 
 bool DecodeContextDecode(struct DecodeContext* decode_context,
                          const void* buffer, size_t size) {
+  if (decode_context->dump_fd != -1) {
+    if (write(decode_context->dump_fd, buffer, size) != (ssize_t)size) {
+      LOG("Failed to write video dump file (%s)", strerror(errno));
+      return false;
+    }
+  }
+
   mfxBitstream bitstream = {
       .DecodeTimeStamp = MFX_TIMESTAMP_UNKNOWN,
       .TimeStamp = (mfxU64)MFX_TIMESTAMP_UNKNOWN,
@@ -477,5 +497,6 @@ void DecodeContextDestroy(struct DecodeContext* decode_context) {
   MFXClose(decode_context->mfx_session);
   vaTerminate(decode_context->va_display);
   close(decode_context->drm_fd);
+  if (decode_context->dump_fd != -1) close(decode_context->dump_fd);
   free(decode_context);
 }
