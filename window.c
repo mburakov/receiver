@@ -94,23 +94,24 @@ struct Overlay {
 static void OnWlRegistryGlobal(void* data, struct wl_registry* wl_registry,
                                uint32_t name, const char* interface,
                                uint32_t version) {
-#define MAYBE_BIND(what)                                                      \
+  (void)version;
+#define MAYBE_BIND(what, ver)                                                 \
   if (!strcmp(interface, what##_interface.name)) {                            \
     window->what =                                                            \
-        wl_registry_bind(wl_registry, name, &what##_interface, version);      \
+        wl_registry_bind(wl_registry, name, &what##_interface, ver);          \
     if (!window->what) LOG("Failed to bind " #what " (%s)", strerror(errno)); \
     return;                                                                   \
   }
   struct Window* window = data;
-  MAYBE_BIND(wl_compositor)
-  MAYBE_BIND(wl_shm)
-  MAYBE_BIND(wl_seat)
-  MAYBE_BIND(wl_subcompositor)
-  MAYBE_BIND(wp_viewporter)
-  MAYBE_BIND(xdg_wm_base)
-  MAYBE_BIND(zwp_linux_dmabuf_v1)
-  MAYBE_BIND(zwp_pointer_constraints_v1)
-  MAYBE_BIND(zwp_relative_pointer_manager_v1)
+  MAYBE_BIND(wl_compositor, 1)
+  MAYBE_BIND(wl_shm, 1)
+  MAYBE_BIND(wl_seat, 8)
+  MAYBE_BIND(wl_subcompositor, 1)
+  MAYBE_BIND(wp_viewporter, 1)
+  MAYBE_BIND(xdg_wm_base, 1)
+  MAYBE_BIND(zwp_linux_dmabuf_v1, 2)
+  MAYBE_BIND(zwp_pointer_constraints_v1, 1)
+  MAYBE_BIND(zwp_relative_pointer_manager_v1, 1)
 #undef MAYBE_BIND
 }
 
@@ -223,23 +224,6 @@ static void OnXdgToplevelClose(void* data, struct xdg_toplevel* xdg_toplevel) {
   }
 }
 
-static void OnXdgToplevelConfigureBounds(void* data,
-                                         struct xdg_toplevel* xdg_toplevel,
-                                         int32_t width, int32_t height) {
-  (void)data;
-  (void)xdg_toplevel;
-  (void)width;
-  (void)height;
-}
-
-static void OnXdgToplevelWmCapabilities(void* data,
-                                        struct xdg_toplevel* xdg_toplevel,
-                                        struct wl_array* capabilities) {
-  (void)data;
-  (void)xdg_toplevel;
-  (void)capabilities;
-}
-
 static bool InitWaylandToplevel(struct Window* window) {
   window->wl_surface = wl_compositor_create_surface(window->wl_compositor);
   if (!window->wl_surface) {
@@ -278,8 +262,6 @@ static bool InitWaylandToplevel(struct Window* window) {
   static const struct xdg_toplevel_listener xdg_toplevel_listener = {
       .configure = OnXdgToplevelConfigure,
       .close = OnXdgToplevelClose,
-      .configure_bounds = OnXdgToplevelConfigureBounds,
-      .wm_capabilities = OnXdgToplevelWmCapabilities,
   };
   if (xdg_toplevel_add_listener(window->xdg_toplevel, &xdg_toplevel_listener,
                                 window)) {
