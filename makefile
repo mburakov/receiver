@@ -21,7 +21,7 @@ protocols_dir:=\
 
 protocols:=\
 	viewporter \
-	linux-dmabuf-unstable-v1 \
+	linux-dmabuf-v1 \
 	pointer-constraints-unstable-v1 \
 	relative-pointer-unstable-v1 \
 	xdg-shell

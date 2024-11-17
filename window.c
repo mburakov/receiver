@@ -30,7 +30,7 @@
 #include <wayland-client.h>
 
 #include "frame.h"
-#include "linux-dmabuf-unstable-v1.h"
+#include "linux-dmabuf-v1.h"
 #include "pointer-constraints-unstable-v1.h"
 #include "relative-pointer-unstable-v1.h"
 #include "toolbox/utils.h"
