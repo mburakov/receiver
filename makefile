@@ -13,7 +13,6 @@ libs:=\
 	libpipewire-0.3 \
 	libva \
 	libva-drm \
-	mfx \
 	wayland-client
 
 protocols_dir:=\
@@ -26,6 +25,17 @@ protocols:=\
 	relative-pointer-unstable-v1 \
 	xdg-shell
 
+ifdef USE_LIBMFX
+	libs+=mfx
+	CFLAGS+=-DUSE_LIBMFX
+else
+	obj+=\
+		mfx_stub/bitstream.o \
+		mfx_stub/mfxsession.o \
+		mfx_stub/mfxvideo.o
+	CFLAGS+=-Imfx_stub/include
+endif
+
 obj:=$(patsubst %,%.o,$(protocols)) $(obj)
 headers:=$(patsubst %,%.h,$(protocols))
 CFLAGS+=$(shell pkg-config --cflags $(libs))
@@ -36,7 +46,7 @@ all: $(bin)
 $(bin): $(obj)
 	$(CC) $^ $(LDFLAGS) -o $@
 
-%.o: %.c *.h $(headers)
+%.o: %.c *.h */*.h $(headers)
 	$(CC) -c $< $(CFLAGS) -o $@
 
 %.h: $(protocols_dir)/*/*/%.xml
