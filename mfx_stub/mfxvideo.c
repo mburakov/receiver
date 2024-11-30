@@ -23,6 +23,8 @@
 #include "bitstream.h"
 #include "mfxsession_impl.h"
 
+#define LENGTH(x) (sizeof(x) / sizeof *(x))
+
 // Table 7-1 – NAL unit type codes and NAL unit type classes
 enum NalUnitType {
   TRAIL_R = 1,
@@ -36,6 +38,16 @@ enum NalUnitType {
   PPS_NUT = 34,
   AUD_NUT = 35,
 };
+
+// Table 7-7
+enum SliceType {
+  P = 1,
+  I = 2,
+};
+
+static uint64_t CeilLog2(uint64_t x) {
+  return (uint64_t)(32 - __builtin_clz((uint32_t)(x - 1)));
+}
 
 // 7.3.1.2 NAL unit header syntax
 static uint8_t ParseNaluHeader(struct Bitstream* nalu) {
@@ -158,6 +170,8 @@ static void ParseSps(struct Bitstream* nalu, mfxSession session) {
       (uint32_t)BitstreamReadU(nalu, 1);
   session->ppb.slice_parsing_fields.bits.sample_adaptive_offset_enabled_flag =
       (uint32_t)BitstreamReadU(nalu, 1);
+  assert(session->ppb.slice_parsing_fields.bits
+             .sample_adaptive_offset_enabled_flag == 1);
   session->ppb.pic_fields.bits.pcm_enabled_flag =
       (uint32_t)BitstreamReadU(nalu, 1);
   assert(session->ppb.pic_fields.bits.pcm_enabled_flag == 0);
@@ -195,6 +209,7 @@ static void ParsePps(struct Bitstream* nalu, mfxSession session) {
       (uint32_t)BitstreamReadU(nalu, 1);
   session->ppb.slice_parsing_fields.bits.output_flag_present_flag =
       (uint32_t)BitstreamReadU(nalu, 1);
+  assert(session->ppb.slice_parsing_fields.bits.output_flag_present_flag == 0);
   session->ppb.num_extra_slice_header_bits = (uint8_t)BitstreamReadU(nalu, 3);
   assert(session->ppb.num_extra_slice_header_bits == 0);
 
@@ -277,6 +292,137 @@ static void ParsePps(struct Bitstream* nalu, mfxSession session) {
   assert(BitstreamReadU(nalu, 1) == 0);  // pps_extension_present_flag
 }
 
+// 7.3.6.1 General slice segment header syntax
+void ParseSliceSegmentHeader(struct Bitstream* nalu, mfxSession session,
+                             enum NalUnitType nal_unit_type) {
+  memset(&session->spb, 0, sizeof(session->spb));
+
+  assert(BitstreamReadU(nalu, 1) == 1);  // first_slice_segment_in_pic_flag
+  if (nal_unit_type >= BLA_W_LP && nal_unit_type <= RSV_IRAP_VCL23) {
+    assert(BitstreamReadU(nalu, 1) == 0);  // no_output_of_prior_pics_flag
+  }
+  assert(BitstreamReadUE(nalu) == 0);  // slice_pic_parameter_set_id
+  session->spb.LongSliceFlags.fields.slice_type =
+      (uint32_t)BitstreamReadUE(nalu);
+
+  if (nal_unit_type != IDR_W_RADL && nal_unit_type != IDR_N_LP) {
+    size_t slice_pic_order_cnt_lsb_length =
+        session->ppb.log2_max_pic_order_cnt_lsb_minus4 + 4;
+    size_t slice_pic_order_cnt_lsb =
+        BitstreamReadU(nalu, slice_pic_order_cnt_lsb_length);
+    bool short_term_ref_pic_set_sps_flag = !!BitstreamReadU(nalu, 1);
+    if (!short_term_ref_pic_set_sps_flag) {
+      size_t offset = nalu->offset;
+      size_t epb_count = nalu->epb_count;
+      ParseStRefPicSet(nalu, session->ppb.num_short_term_ref_pic_sets);
+      session->ppb.st_rps_bits =
+          (uint32_t)(nalu->offset - offset -
+                     ((nalu->epb_count - epb_count) << 3));
+    } else if (session->ppb.num_short_term_ref_pic_sets > 1) {
+      uint64_t short_term_ref_pic_set_idx_length =
+          CeilLog2(session->ppb.num_short_term_ref_pic_sets);
+      uint64_t short_term_ref_pic_set_idx =
+          BitstreamReadU(nalu, (size_t)short_term_ref_pic_set_idx_length);
+    }
+
+    if (session->ppb.slice_parsing_fields.bits.sps_temporal_mvp_enabled_flag) {
+      session->spb.LongSliceFlags.fields.slice_temporal_mvp_enabled_flag =
+          (uint32_t)BitstreamReadU(nalu, 1);
+    }
+    session->spb.LongSliceFlags.fields.slice_sao_luma_flag =
+        (uint32_t)BitstreamReadU(nalu, 1);
+    assert(session->spb.LongSliceFlags.fields.slice_sao_luma_flag == 1);
+
+    session->spb.LongSliceFlags.fields.slice_sao_chroma_flag =
+        (uint32_t)BitstreamReadU(nalu, 1);
+    assert(session->spb.LongSliceFlags.fields.slice_sao_chroma_flag == 1);
+  }
+
+  // vvv weird vvv
+  session->spb.collocated_ref_idx = 0xff;
+  session->spb.LongSliceFlags.fields.collocated_from_l0_flag = 1;
+  session->spb.num_ref_idx_l0_active_minus1 =
+      session->ppb.num_ref_idx_l0_default_active_minus1;
+  session->spb.num_ref_idx_l1_active_minus1 =
+      session->ppb.num_ref_idx_l1_default_active_minus1;
+  // ^^^ weird ^^^
+
+  if (session->spb.LongSliceFlags.fields.slice_type == P) {
+    bool num_ref_idx_active_override_flag = !!BitstreamReadU(nalu, 1);
+    if (num_ref_idx_active_override_flag) {
+      session->spb.num_ref_idx_l0_active_minus1 =
+          (uint8_t)BitstreamReadUE(nalu);
+    }
+    if (session->ppb.slice_parsing_fields.bits.cabac_init_present_flag) {
+      session->spb.LongSliceFlags.fields.cabac_init_flag =
+          (uint32_t)BitstreamReadU(nalu, 1);
+    }
+    if (session->spb.LongSliceFlags.fields.slice_temporal_mvp_enabled_flag) {
+      if ((session->spb.LongSliceFlags.fields.collocated_from_l0_flag &&
+           session->spb.num_ref_idx_l0_active_minus1 > 0) ||
+          (!session->spb.LongSliceFlags.fields.collocated_from_l0_flag &&
+           session->spb.num_ref_idx_l1_active_minus1 > 0)) {
+        session->spb.collocated_ref_idx = (uint8_t)BitstreamReadUE(nalu);
+      }
+    }
+    session->spb.five_minus_max_num_merge_cand = (uint8_t)BitstreamReadUE(nalu);
+  }
+  session->spb.slice_qp_delta = (int8_t)BitstreamReadSE(nalu);
+  if (session->ppb.pic_fields.bits.pps_loop_filter_across_slices_enabled_flag &&
+      (session->spb.LongSliceFlags.fields.slice_sao_luma_flag ||
+       session->spb.LongSliceFlags.fields.slice_sao_chroma_flag)) {
+    session->spb.LongSliceFlags.fields
+        .slice_loop_filter_across_slices_enabled_flag =
+        (uint32_t)BitstreamReadU(nalu, 1);
+  }
+  BitstreamByteAlign(nalu);
+}
+
+static bool UploadAndDecode(mfxSession session, const struct Bitstream* nalu) {
+  VABufferID ppb_id;
+  VAStatus status = vaCreateBuffer(
+      session->display, session->context_id, VAPictureParameterBufferType,
+      sizeof(session->ppb), 1, &session->ppb, &ppb_id);
+  if (status != VA_STATUS_SUCCESS) return false;
+
+  VABufferID spb_id;
+  status = vaCreateBuffer(session->display, session->context_id,
+                          VASliceParameterBufferType, sizeof(session->spb), 1,
+                          &session->spb, &spb_id);
+  if (status != VA_STATUS_SUCCESS) goto rollback_ppb_id;
+
+  VABufferID sdb_id;
+  status = vaCreateBuffer(session->display, session->context_id,
+                          VASliceDataBufferType, (unsigned int)nalu->size, 1,
+                          (void*)(uintptr_t)nalu->data, &sdb_id);
+  if (status != VA_STATUS_SUCCESS) goto rollback_spb_id;
+
+  status = vaBeginPicture(session->display, session->context_id,
+                          session->ppb.CurrPic.picture_id);
+  if (status != VA_STATUS_SUCCESS) goto rollback_sdb_id;
+
+  VABufferID buffers[] = {ppb_id, spb_id, sdb_id};
+  status = vaRenderPicture(session->display, session->context_id, buffers,
+                           LENGTH(buffers));
+  if (status != VA_STATUS_SUCCESS) goto rollback_sdb_id;
+
+  status = vaEndPicture(session->display, session->context_id);
+  if (status != VA_STATUS_SUCCESS) goto rollback_sdb_id;
+
+  assert(vaDestroyBuffer(session->display, sdb_id) == VA_STATUS_SUCCESS);
+  assert(vaDestroyBuffer(session->display, spb_id) == VA_STATUS_SUCCESS);
+  assert(vaDestroyBuffer(session->display, ppb_id) == VA_STATUS_SUCCESS);
+  return true;
+
+rollback_sdb_id:
+  assert(vaDestroyBuffer(session->display, sdb_id) == VA_STATUS_SUCCESS);
+rollback_spb_id:
+  assert(vaDestroyBuffer(session->display, spb_id) == VA_STATUS_SUCCESS);
+rollback_ppb_id:
+  assert(vaDestroyBuffer(session->display, ppb_id) == VA_STATUS_SUCCESS);
+  return false;
+}
+
 mfxStatus MFXVideoCORE_SetFrameAllocator(mfxSession session,
                                          mfxFrameAllocator* allocator) {
   session->allocator = *allocator;
@@ -312,11 +458,9 @@ mfxStatus MFXVideoDECODE_DecodeHeader(mfxSession session, mfxBitstream* bs,
   struct Bitstream bitstream = BitstreamCreate(bs->Data, bs->DataLength);
   for (struct Bitstream nalu; BitstreamAvail(&bitstream);) {
     if (!BitstreamReadNalu(&bitstream, &nalu)) {
-      assert(0);
       return MFX_ERR_UNSUPPORTED;
     }
     if (BitstreamReadFailed(&nalu)) {
-      assert(0);
       return MFX_ERR_UNSUPPORTED;
     }
     uint8_t nal_unit_type = ParseNaluHeader(&nalu);
@@ -396,6 +540,90 @@ mfxStatus MFXVideoDECODE_DecodeFrameAsync(mfxSession session, mfxBitstream* bs,
                                           mfxFrameSurface1* surface_work,
                                           mfxFrameSurface1** surface_out,
                                           mfxSyncPoint* syncp) {
-  assert(0);
+  (void)syncp;
+  struct Bitstream bitstream = BitstreamCreate(bs->Data, bs->DataLength);
+  for (struct Bitstream nalu; BitstreamAvail(&bitstream);) {
+    if (!BitstreamReadNalu(&bitstream, &nalu)) {
+      return MFX_ERR_UNSUPPORTED;
+    }
+    if (BitstreamReadFailed(&nalu)) {
+      return MFX_ERR_UNSUPPORTED;
+    }
+    uint8_t nal_unit_type = ParseNaluHeader(&nalu);
+    if (nal_unit_type != TRAIL_R && nal_unit_type != IDR_W_RADL) continue;
+    ParseSliceSegmentHeader(&nalu, session, nal_unit_type);
+
+    ////////////////////////////////////////////////////////////////////////////
+
+    mfxHDL psurface_current;
+    mfxMemId mid_current =
+        session->mids[session->global_frame_counter % session->mids_count];
+    mfxStatus status = session->allocator.GetHDL(
+        session->allocator.pthis, mid_current, &psurface_current);
+    if (status != MFX_ERR_NONE) return status;
+
+    session->ppb.CurrPic.picture_id = *(VASurfaceID*)psurface_current;
+    session->ppb.CurrPic.pic_order_cnt = (int32_t)session->local_frame_counter;
+    for (size_t i = 0; i < LENGTH(session->ppb.ReferenceFrames); i++) {
+      session->ppb.ReferenceFrames[i].picture_id = VA_INVALID_SURFACE;
+    }
+    session->ppb.pic_fields.bits.NoBiPredFlag = 1;
+    session->ppb.slice_parsing_fields.bits.RapPicFlag =
+        BLA_W_LP <= nal_unit_type && nal_unit_type <= CRA_NUT;
+    session->ppb.slice_parsing_fields.bits.IdrPicFlag =
+        IDR_W_RADL <= nal_unit_type && nal_unit_type <= IDR_N_LP;
+    session->ppb.slice_parsing_fields.bits.IntraPicFlag =
+        BLA_W_LP <= nal_unit_type && nal_unit_type <= RSV_IRAP_VCL23;
+    session->spb.slice_data_size = (uint32_t)nalu.size;
+    session->spb.slice_data_offset = 0;
+    session->spb.slice_data_flag = VA_SLICE_DATA_FLAG_ALL;
+    session->spb.slice_data_byte_offset =
+        (uint32_t)((nalu.offset >> 3) - nalu.epb_count);
+    for (size_t i = 0; i < LENGTH(session->spb.RefPicList); i++) {
+      for (size_t j = 0; j < LENGTH(session->spb.RefPicList[i]); j++) {
+        session->spb.RefPicList[i][j] = 0xff;
+      }
+    }
+    session->spb.LongSliceFlags.fields.LastSliceOfPic = 1;
+    session->spb.slice_data_num_emu_prevn_bytes = (uint16_t)nalu.epb_count;
+
+    ////////////////////////////////////////////////////////////////////////////
+
+    if (nal_unit_type == IDR_W_RADL) {
+      session->local_frame_counter = 0;
+    } else {
+      mfxHDL psurface_prev;
+      mfxMemId mid_prev =
+          session
+              ->mids[(session->global_frame_counter - 1) % session->mids_count];
+      status = session->allocator.GetHDL(session->allocator.pthis, mid_prev,
+                                         &psurface_prev);
+      if (status != MFX_ERR_NONE) return status;
+      session->ppb.ReferenceFrames[0].picture_id = *(VASurfaceID*)psurface_prev;
+      session->ppb.ReferenceFrames[0].pic_order_cnt =
+          (int32_t)session->local_frame_counter - 1;
+      session->ppb.ReferenceFrames[0].flags =
+          VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE;
+      session->spb.RefPicList[0][0] = 0;
+    }
+
+    // TODO(mburakov): Does not seem to be used anywhere...
+    (void)session->spb.entry_offset_to_subset_array;
+
+    ////////////////////////////////////////////////////////////////////////////
+
+    if (!UploadAndDecode(session, &nalu)) {
+      return MFX_ERR_DEVICE_FAILED;
+    }
+    session->global_frame_counter++;
+    session->local_frame_counter++;
+    *surface_out = surface_work;
+    *surface_work = (mfxFrameSurface1){
+        // TODO(mburakov): Implement crop rect!!!
+        .Info.CropW = session->ppb.pic_width_in_luma_samples,
+        .Info.CropH = session->ppb.pic_height_in_luma_samples,
+        .Data.MemId = mid_current,
+    };
+  }
   return MFX_ERR_NONE;
 }

@@ -15,6 +15,7 @@
  * along with receiver.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <assert.h>
 #include <mfxsession.h>
 #include <stdlib.h>
 
@@ -23,13 +24,36 @@
 mfxStatus MFXInit(mfxIMPL impl, mfxVersion* ver, mfxSession* session) {
   (void)impl;
   (void)ver;
-  mfxSession result = malloc(sizeof(struct _mfxSession));
+  mfxSession result = calloc(1, sizeof(struct _mfxSession));
   if (!result) return MFX_ERR_MEMORY_ALLOC;
+  *result = (struct _mfxSession){
+      .config_id = VA_INVALID_ID,
+      .context_id = VA_INVALID_ID,
+  };
   *session = result;
   return MFX_ERR_NONE;
 }
 
 mfxStatus MFXClose(mfxSession session) {
+  if (session->mids) {
+    for (size_t i = 0; i < session->mids_count; i++) {
+      mfxFrameAllocResponse response = {
+          .mids = session->mids,
+          .NumFrameActual = (mfxU16)session->mids_count,
+      };
+      assert(session->allocator.Free(session->allocator.pthis, &response) ==
+             MFX_ERR_NONE);
+    }
+    free(session->mids);
+  }
+  if (session->context_id != VA_INVALID_ID) {
+    assert(vaDestroyContext(session->display, session->context_id) ==
+           VA_STATUS_SUCCESS);
+  }
+  if (session->config_id != VA_INVALID_ID) {
+    assert(vaDestroyConfig(session->display, session->config_id) ==
+           VA_STATUS_SUCCESS);
+  }
   free(session);
   return MFX_ERR_NONE;
 }
