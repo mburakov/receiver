@@ -36,14 +36,12 @@ mfxStatus MFXInit(mfxIMPL impl, mfxVersion* ver, mfxSession* session) {
 
 mfxStatus MFXClose(mfxSession session) {
   if (session->mids) {
-    for (size_t i = 0; i < session->mids_count; i++) {
-      mfxFrameAllocResponse response = {
-          .mids = session->mids,
-          .NumFrameActual = (mfxU16)session->mids_count,
-      };
-      assert(session->allocator.Free(session->allocator.pthis, &response) ==
-             MFX_ERR_NONE);
-    }
+    mfxFrameAllocResponse response = {
+        .mids = session->mids,
+        .NumFrameActual = (mfxU16)session->mids_count,
+    };
+    assert(session->allocator.Free(session->allocator.pthis, &response) ==
+           MFX_ERR_NONE);
     free(session->mids);
   }
   if (session->context_id != VA_INVALID_ID) {

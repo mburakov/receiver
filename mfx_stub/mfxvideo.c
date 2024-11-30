@@ -146,8 +146,7 @@ static void ParseSps(struct Bitstream* nalu, mfxSession session) {
 
   session->ppb.sps_max_dec_pic_buffering_minus1 =
       (uint8_t)BitstreamReadUE(nalu);
-  session->ppb.pic_fields.bits.NoPicReorderingFlag =
-      !!BitstreamReadUE(nalu);         // sps_max_num_reorder_pics
+  assert(BitstreamReadUE(nalu) == 0);  // sps_max_num_reorder_pics
   assert(BitstreamReadUE(nalu) == 0);  // sps_max_latency_increase_plus1
 
   session->ppb.log2_min_luma_coding_block_size_minus3 =
@@ -329,14 +328,14 @@ void ParseSliceSegmentHeader(struct Bitstream* nalu, mfxSession session,
       session->spb.LongSliceFlags.fields.slice_temporal_mvp_enabled_flag =
           (uint32_t)BitstreamReadU(nalu, 1);
     }
-    session->spb.LongSliceFlags.fields.slice_sao_luma_flag =
-        (uint32_t)BitstreamReadU(nalu, 1);
-    assert(session->spb.LongSliceFlags.fields.slice_sao_luma_flag == 1);
-
-    session->spb.LongSliceFlags.fields.slice_sao_chroma_flag =
-        (uint32_t)BitstreamReadU(nalu, 1);
-    assert(session->spb.LongSliceFlags.fields.slice_sao_chroma_flag == 1);
   }
+
+  session->spb.LongSliceFlags.fields.slice_sao_luma_flag =
+      (uint32_t)BitstreamReadU(nalu, 1);
+  assert(session->spb.LongSliceFlags.fields.slice_sao_luma_flag == 1);
+  session->spb.LongSliceFlags.fields.slice_sao_chroma_flag =
+      (uint32_t)BitstreamReadU(nalu, 1);
+  assert(session->spb.LongSliceFlags.fields.slice_sao_chroma_flag == 1);
 
   // vvv weird vvv
   session->spb.collocated_ref_idx = 0xff;
@@ -562,11 +561,13 @@ mfxStatus MFXVideoDECODE_DecodeFrameAsync(mfxSession session, mfxBitstream* bs,
         session->allocator.pthis, mid_current, &psurface_current);
     if (status != MFX_ERR_NONE) return status;
 
+    if (nal_unit_type == IDR_W_RADL) session->local_frame_counter = 0;
     session->ppb.CurrPic.picture_id = *(VASurfaceID*)psurface_current;
     session->ppb.CurrPic.pic_order_cnt = (int32_t)session->local_frame_counter;
     for (size_t i = 0; i < LENGTH(session->ppb.ReferenceFrames); i++) {
       session->ppb.ReferenceFrames[i].picture_id = VA_INVALID_SURFACE;
     }
+    session->ppb.pic_fields.bits.NoPicReorderingFlag = 1;
     session->ppb.pic_fields.bits.NoBiPredFlag = 1;
     session->ppb.slice_parsing_fields.bits.RapPicFlag =
         BLA_W_LP <= nal_unit_type && nal_unit_type <= CRA_NUT;
@@ -589,9 +590,7 @@ mfxStatus MFXVideoDECODE_DecodeFrameAsync(mfxSession session, mfxBitstream* bs,
 
     ////////////////////////////////////////////////////////////////////////////
 
-    if (nal_unit_type == IDR_W_RADL) {
-      session->local_frame_counter = 0;
-    } else {
+    if (session->local_frame_counter) {
       mfxHDL psurface_prev;
       mfxMemId mid_prev =
           session
