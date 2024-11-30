@@ -1,6 +1,6 @@
 # Receiver
 
-This is a lightweight streaming client that works together with [streamer](https://burakov.eu/streamer.git) server. It receives encoded HEVC bitstream over tcp connection, decodes it using Intel Media SDK, and renders the resulting buffers using Wayland. Everything is done hardware-accelerated and zero-copy. Receiver listens for input events from a Wayland compositor, converts those to UHID messages, and sends those to streamer server over the same tcp connection.
+This is a lightweight streaming client that works together with [streamer](https://burakov.eu/streamer.git) server. It receives encoded HEVC bitstream over tcp connection, decodes it using either Intel Media SDK or a compatible VAAPI-based stub, and renders the resulting buffers using Wayland. Everything is done hardware-accelerated and zero-copy. Receiver listens for input events from a Wayland compositor, converts those to UHID messages, and sends those to streamer server over the same tcp connection.
 
 Receiver can also receive an audio stream captured by the streamer, if the latter is built with pipewire support. Audio is streamed uncompressed to improve the latency.
 
@@ -10,12 +10,17 @@ Receiver depends on following libraries:
 * libpipewire-0.3
 * libva
 * libva-drm
-* mfx
+* mfx (optional)
 * wayland-client
 
 Once you have these installed, just
 ```
 make
+```
+
+Alternatively, to build with Intel Media SDK support
+```
+make USE_LIBMFX=1
 ```
 
 ## Building anywhere else
@@ -25,12 +30,13 @@ I don't care about any other platforms except Linux, so you are on your own. Mor
 ## Running
 
 There are couple of things receiver implies, i.e. that your system is supported by Intel Media SDK. Wayland compositor is expected to support following protocols:
-* linux-dmabuf-unstable-v1,
+* linux-dmabuf-v1,
 * pointer-constraints-unstable-v1,
 * relative-pointer-unstable-v1,
+* viewporter,
 * xdg-shell.
 
-This is certainly the case with any recent Intel CPU and sway compositor. It would probably work with other wlroots-based compositors too. I never cared enough to check if Intel Media SDK works on AMD systems. In case it does, receiver would work on AMD hardware as well. Nvidia configurations are certainly not supported. Not just VA-API, but also linux-dmabuf-unstable-v1 Wayland protocol are not expected to work. So no Nvidia please.
+This is certainly the case with any recent Intel CPU and sway compositor. It would probably work with other wlroots-based compositors too. It also works properly on AMD CPU when built without Intel Media SDK. Nvidia configurations are certainly not supported. Not just VAAPI, but also linux-dmabuf-v1 Wayland protocol are not expected to work. So no Nvidia please.
 
 Provide ip address and port number of listening [streamer](https://burakov/streamer.git) instance on the commandline:
 ```
@@ -45,6 +51,11 @@ Basic stats reporting is available in the receiver. It should be taken with a gr
 If you want to receive an audio stream, and streamer is built and run with the respective options, provide the audio rinbuffer size in samples on the commandline. I.e. 100ms buffer looks like a good starting point, so for 48000 sample rate you can use following commandline (4800 samples is 100ms for 48000 sample rate):
 ```
 ./receiver 192.168.8.5:1337 --stats --audio 4800
+```
+
+For debugging purposes it is also possible to disable input events forwarding and/or dump the streamed video to a file. Option names are self-explainatory:
+```
+./receiver 192.168.8.5:1337 --no-input --dump-video /tmp/dump.h265
 ```
 
 ## What about Steam Link?

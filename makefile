@@ -19,10 +19,10 @@ protocols_dir:=\
 	/usr/share/wayland-protocols
 
 protocols:=\
-	viewporter \
 	linux-dmabuf-v1 \
 	pointer-constraints-unstable-v1 \
 	relative-pointer-unstable-v1 \
+	viewporter \
 	xdg-shell
 
 ifdef USE_LIBMFX
