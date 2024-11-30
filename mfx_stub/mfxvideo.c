@@ -89,7 +89,7 @@ static void ParseStRefPicSet(struct Bitstream* nalu, uint64_t stRpsIdx) {
 }
 
 // E.2.1 VUI parameters syntax
-static void ParseVuiParameters(struct Bitstream* nalu) {
+static void ParseVuiParameters(struct Bitstream* nalu, mfxSession session) {
   assert(BitstreamReadU(nalu, 1) == 0);  // aspect_ratio_info_present_flag
   assert(BitstreamReadU(nalu, 1) == 0);  // overscan_info_present_flag
   assert(BitstreamReadU(nalu, 1) == 1);  // video_signal_type_present_flag
@@ -97,7 +97,7 @@ static void ParseVuiParameters(struct Bitstream* nalu) {
   // Table E.2 – Meaning of video_format
   assert(BitstreamReadU(nalu, 3) == 5);  // video_format
   assert(BitstreamReadU(nalu, 1) == 0);  // video_full_range_flag
-  assert(BitstreamReadU(nalu, 1) == 1);  //  colour_description_present_flag
+  assert(BitstreamReadU(nalu, 1) == 1);  // colour_description_present_flag
 
   assert(BitstreamReadU(nalu, 8) == 2);  // colour_primaries
   assert(BitstreamReadU(nalu, 8) == 2);  // transfer_characteristics
@@ -106,6 +106,22 @@ static void ParseVuiParameters(struct Bitstream* nalu) {
   assert(BitstreamReadU(nalu, 1) == 0);  // chroma_loc_info_present_flag
   assert(BitstreamReadU(nalu, 1) == 0);  // neutral_chroma_indication_flag
   assert(BitstreamReadU(nalu, 1) == 0);  // field_seq_flag
+  assert(BitstreamReadU(nalu, 1) == 0);  // frame_field_info_present_flag
+
+  bool default_display_window_flag = !!BitstreamReadU(nalu, 1);
+  if (default_display_window_flag) {
+    uint64_t def_disp_win_left_offset = BitstreamReadUE(nalu);
+    uint64_t def_disp_win_right_offset = BitstreamReadUE(nalu);
+    uint64_t def_disp_win_top_offset = BitstreamReadUE(nalu);
+    uint64_t def_disp_win_bottom_offset = BitstreamReadUE(nalu);
+    session->crop_rect[0] = (mfxU16)def_disp_win_left_offset;
+    session->crop_rect[1] = (mfxU16)def_disp_win_top_offset;
+    session->crop_rect[2] = (mfxU16)(session->ppb.pic_width_in_luma_samples -
+                                     def_disp_win_right_offset);
+    session->crop_rect[3] = (mfxU16)(session->ppb.pic_height_in_luma_samples -
+                                     def_disp_win_bottom_offset);
+  }
+
   assert(BitstreamReadU(nalu, 1) == 0);  // vui_timing_info_present_flag
 
   bool bitstream_restriction_flag = !!BitstreamReadU(nalu, 1);
@@ -135,7 +151,22 @@ static void ParseSps(struct Bitstream* nalu, mfxSession session) {
   assert(session->ppb.pic_fields.bits.chroma_format_idc == 1);
   session->ppb.pic_width_in_luma_samples = (uint16_t)BitstreamReadUE(nalu);
   session->ppb.pic_height_in_luma_samples = (uint16_t)BitstreamReadUE(nalu);
-  assert(BitstreamReadU(nalu, 1) == 0);  // conformance_window_flag
+  bool conformance_window_flag = !!BitstreamReadU(nalu, 1);
+  if (conformance_window_flag) {
+    uint64_t conf_win_left_offset = BitstreamReadUE(nalu);
+    uint64_t conf_win_right_offset = BitstreamReadUE(nalu);
+    uint64_t conf_win_top_offset = BitstreamReadUE(nalu);
+    uint64_t conf_win_bottom_offset = BitstreamReadUE(nalu);
+    session->crop_rect[0] = (mfxU16)conf_win_left_offset;
+    session->crop_rect[1] = (mfxU16)conf_win_top_offset;
+    session->crop_rect[2] = (mfxU16)(session->ppb.pic_width_in_luma_samples -
+                                     conf_win_right_offset);
+    session->crop_rect[3] = (mfxU16)(session->ppb.pic_height_in_luma_samples -
+                                     conf_win_bottom_offset);
+  } else {
+    session->crop_rect[2] = session->ppb.pic_width_in_luma_samples;
+    session->crop_rect[3] = session->ppb.pic_height_in_luma_samples;
+  }
 
   session->ppb.bit_depth_luma_minus8 = (uint8_t)BitstreamReadUE(nalu);
   session->ppb.bit_depth_chroma_minus8 = (uint8_t)BitstreamReadUE(nalu);
@@ -195,7 +226,7 @@ static void ParseSps(struct Bitstream* nalu, mfxSession session) {
       (uint32_t)BitstreamReadU(nalu, 1);
   assert(BitstreamReadU(nalu, 1) == 1);  // vui_parameters_present_flag
 
-  ParseVuiParameters(nalu);
+  ParseVuiParameters(nalu, session);
   assert(BitstreamReadU(nalu, 1) == 0);  // sps_extension_present_flag
 }
 
@@ -618,9 +649,10 @@ mfxStatus MFXVideoDECODE_DecodeFrameAsync(mfxSession session, mfxBitstream* bs,
     session->local_frame_counter++;
     *surface_out = surface_work;
     *surface_work = (mfxFrameSurface1){
-        // TODO(mburakov): Implement crop rect!!!
-        .Info.CropW = session->ppb.pic_width_in_luma_samples,
-        .Info.CropH = session->ppb.pic_height_in_luma_samples,
+        .Info.CropX = session->crop_rect[0],
+        .Info.CropY = session->crop_rect[1],
+        .Info.CropW = session->crop_rect[2],
+        .Info.CropH = session->crop_rect[3],
         .Data.MemId = mid_current,
     };
   }

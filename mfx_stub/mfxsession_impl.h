@@ -32,6 +32,7 @@ struct _mfxSession {
   mfxMemId* mids;
   size_t mids_count;
 
+  mfxU16 crop_rect[4];
   VAPictureParameterBufferHEVC ppb;
   VASliceParameterBufferHEVC spb;
   size_t global_frame_counter;
